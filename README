@@ -12,7 +12,8 @@ Keys
 	Alt+F4, Super+Q		close
 	Super+drag		move; drop on top = max, side = half, corner = quarter
 	Super+right drag	resize from the nearest edge/corner
-	Super (tap)		launcher; Enter runs the typed text if nothing matches.
+	Super (tap)		launcher, tap again to close; Enter runs the typed text if
+				nothing matches.
 				Also lock, log out, suspend, restart, shut down.
 	window edges		drag just outside the focused window to resize
 	Ctrl+Alt+T		gnome-terminal
@@ -23,7 +24,8 @@ Keys
 Bar
 	Bottom of each monitor, hidden until the pointer touches the bottom
 	edge (AUTOHIDE in nwm.c). A button per window on that monitor (click
-	focuses, click the focused one minimizes) and a clock. The first one
+	focuses, click the focused one minimizes), a clock and a power button
+	(lock, log out, suspend, restart, shut down). The first one
 	also has status text and tray icons. The status text is the root
 	window name, set with xsetroot -name.
 

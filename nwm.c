@@ -14,11 +14,13 @@
  *   Super+right drag    resize from the nearest edge or corner
  *   bar                 a button per window (click focuses, or minimizes
  *                       the focused one), the root window name as status
- *                       text (xsetroot -name), tray icons and a clock;
- *                       hidden until the pointer touches the bottom edge
- *   Super, tapped       launcher: type, Enter starts the top match, or
- *                       runs what was typed when nothing matches; also
- *                       has lock, log out, suspend, restart, shut down
+ *                       text (xsetroot -name), tray icons, a clock and a
+ *                       power button; hidden until the pointer touches the
+ *                       bottom edge
+ *   Super, tapped       launcher, and again to close it: type, Enter starts
+ *                       the top match, or runs what was typed when nothing
+ *                       matches; also has lock, log out, suspend, restart,
+ *                       shut down
  *   window edges        drag just outside the focused window to resize
  *
  * There are no title bars. Apps with client-side title bars (Chrome, GTK
@@ -84,6 +86,7 @@
 #define AUTOHIDE	1	/* bar shows at the bottom edge; 0 keeps it up */
 #define HIDEDELAY	400	/* ms after the pointer leaves it */
 #define CLOCK		"%a %d %b  %H:%M"
+#define POWER		"\u23fb"	/* the bar's power button */
 #define TRAYSZ		20	/* tray icon size, square */
 #define MAXTRAY		16
 
@@ -187,6 +190,7 @@ enum { SZ_TL, SZ_T, SZ_TR, SZ_R, SZ_BR, SZ_B, SZ_BL, SZ_L, SZ_MOVE };
 /* underscored like the NET ones, but not EWMH, so not in _NET_SUPPORTED */
 #define TRAY_ATOMS(X) \
 	X(NET_SYSTEM_TRAY_OPCODE) X(NET_SYSTEM_TRAY_ORIENTATION) \
+	X(NET_SYSTEM_TRAY_COLORS) \
 	X(XEMBED) X(XEMBED_INFO)
 #define NET_ATOMS(X) \
 	X(NET_SUPPORTED) X(NET_SUPPORTING_WM_CHECK) X(NET_WM_NAME) \
@@ -267,6 +271,7 @@ static struct bar {
 		struct client *c;
 	} btn[MAXTAB];
 	int nbtn;
+	int powerx;		/* where the power button starts */
 } bars[MAXMONS];
 static int nbars, bardirty;
 static long long hideat;	/* ms, monotonic; 0 when no hide is due */
@@ -300,11 +305,12 @@ struct app {
 	char exec[512];
 	int hidden;		/* not an app at all, or deleted */
 	int nodisplay;		/* an app, but not for menus */
+	int session;		/* one of our own lock, log out ... entries */
 	int elsewhere;		/* not for this desktop, or switched off */
 };
 
 static struct app *apps;
-static int napps, launching, superalone, noauto;
+static int napps, launching, launchsession, superalone, noauto;
 static int match[LAUNCHROWS], nmatch, launchsel;
 static char query[128];
 static size_t qlen;
@@ -315,6 +321,7 @@ static void drawtab(void);
 static void endtab(struct client *c);
 static void placegrips(void);
 static int updatethumb(struct client *c);
+static void launchstart(int session);
 
 static void die(const char *msg)
 {
@@ -1834,8 +1841,11 @@ static void drawonebar(int m)
 	XftDrawRect(b->draw, &xc_bg, 0, 0, bw, BARH);
 
 	/* right to left: the clock, then on the first bar tray and status */
+	b->powerx = bw - 2 * pad - textrun(NULL, NULL, 0, 0, POWER,
+					    strlen(POWER));
+	drawtext(b->draw, &xc_fg, b->powerx + pad, base, POWER);
 	strftime(clk, sizeof(clk), CLOCK, localtime(&now));
-	right = bw - pad - textrun(NULL, NULL, 0, 0, clk, strlen(clk));
+	right = b->powerx - textrun(NULL, NULL, 0, 0, clk, strlen(clk));
 	drawtext(b->draw, &xc_fg, right, base, clk);
 	right -= pad;
 	for (i = ntray - 1; m == 0 && i >= 0; i--) {
@@ -1897,12 +1907,19 @@ static void drawbar(void)
 		drawonebar(i);
 }
 
-/* Click a window to bring it up; click the focused one to minimize it. */
+/*
+ * Click a window to bring it up, or the focused one to minimize it; the
+ * power button opens the session entries.
+ */
 static void barclick(struct bar *b, int x)
 {
 	struct client *c;
 	int i;
 
+	if (x >= b->powerx) {
+		launchstart(1);
+		return;
+	}
 	for (i = 0; i < b->nbtn; i++) {
 		if (x < b->btn[i].x || x >= b->btn[i].x + b->btn[i].w)
 			continue;
@@ -2011,6 +2028,12 @@ static void traymapped(Window w, int on)
 /* Take the tray selection and tell running apps there is a tray now. */
 static void traystart(void)
 {
+	long traycolors[12] = {
+		xc_fg.color.red, xc_fg.color.green, xc_fg.color.blue,
+		0xffff, 0x5555, 0x5555,
+		0xf0f0, 0xc6c6, 0x7474,
+		0x8a8a, 0xe2e2, 0x3434,
+	};
 	XEvent ev = { 0 };
 	char name[32];
 	long v = 0;
@@ -2025,6 +2048,14 @@ static void traystart(void)
 	XChangeProperty(dpy, TRAYWIN, atom[NET_SYSTEM_TRAY_ORIENTATION],
 			XA_CARDINAL, 32, PropModeReplace,
 			(unsigned char *)&v, 1);
+	/*
+	 * Symbolic icons are drawn in these: foreground, error, warning,
+	 * success. Without them GTK uses the theme's text colour, dark on a
+	 * light theme, which is black on this bar.
+	 */
+	XChangeProperty(dpy, TRAYWIN, atom[NET_SYSTEM_TRAY_COLORS],
+			XA_CARDINAL, 32, PropModeReplace,
+			(unsigned char *)traycolors, 12);
 	ev.type = ClientMessage;
 	ev.xclient.window = root;
 	ev.xclient.message_type = atom[MANAGER];
@@ -2198,6 +2229,7 @@ static void loadapps(void)
 	for (i = 0; i < LEN(session) && napps < MAXAPPS; i++) {
 		a = &apps[napps++];
 		memset(a, 0, sizeof(*a));
+		a->session = 1;
 		snprintf(a->name, sizeof(a->name), "%s", session[i][0]);
 		if (session[i][1])
 			snprintf(a->exec, sizeof(a->exec), "%s", session[i][1]);
@@ -2250,6 +2282,7 @@ static void filter(void)
 		for (i = 0; i < napps && nmatch < LAUNCHROWS; i++) {
 			if (apps[i].hidden || apps[i].nodisplay ||
 			    apps[i].elsewhere ||
+			    (launchsession && !apps[i].session) ||
 			    !(p = strcasestr(apps[i].name, query)))
 				continue;
 			if ((p == apps[i].name) == !pass)
@@ -2289,7 +2322,8 @@ static void drawlaunch(void)
 	}
 }
 
-static void launchstart(void)
+/* The launcher, or with session set just lock, log out and the rest. */
+static void launchstart(int session)
 {
 	if (tabbing || launching)
 		return;
@@ -2297,6 +2331,7 @@ static void launchstart(void)
 			  CurrentTime) != GrabSuccess)
 		return;
 	launching = 1;
+	launchsession = session;
 	loadapps();
 	query[0] = '\0';
 	qlen = 0;
@@ -2319,6 +2354,8 @@ static void launchkey(XKeyEvent *ev)
 
 	switch (sym) {
 	case XK_Escape:
+	case XK_Super_L:
+	case XK_Super_R:
 		endlaunch();
 		return;
 	case XK_Return:
@@ -2533,7 +2570,7 @@ static void keyrelease(XEvent *e)
 		endtab(ntab ? tab[tabsel] : NULL);
 	} else if (superalone && (sym == XK_Super_L || sym == XK_Super_R)) {
 		superalone = 0;
-		launchstart();
+		launchstart(0);
 	}
 }
 
