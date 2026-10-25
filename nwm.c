@@ -83,7 +83,7 @@
 #define TERMINAL	"gnome-terminal --"	/* for Terminal=true apps */
 #define BARH		28	/* bottom bar on each monitor; 0 for none */
 #define BARBTN		220	/* widest a window button gets */
-#define BARGAP		14	/* between the things on the right */
+#define BARGAP		8	/* between the things on the right */
 #define AUTOHIDE	1	/* bar shows at the bottom edge; 0 keeps it up */
 #define HIDEDELAY	400	/* ms after the pointer leaves it */
 #define CLOCK		"%a %d %b  %H:%M"
@@ -1903,7 +1903,8 @@ static void drawonebar(int m)
 	drawtext(b->draw, &xc_fg, right, base, POWER);
 	b->powerx = right - BARGAP / 2;
 	strftime(clk, sizeof(clk), CLOCK, localtime(&now));
-	right -= BARGAP + textrun(NULL, NULL, 0, 0, clk, strlen(clk));
+	/* the power glyph carries its own space on the left */
+	right -= BARGAP - 3 + textrun(NULL, NULL, 0, 0, clk, strlen(clk));
 	drawtext(b->draw, &xc_fg, right, base, clk);
 	battery(bat, sizeof(bat));
 	if (*bat) {
