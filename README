@@ -1,0 +1,48 @@
+nwm - a small X11 window manager
+
+The Cinnamon tweaks from linux-essentials (windows-snap, alttab-instant,
+alttab-close, smart-close, drag-to-top maximize), without Cinnamon. Plain
+Xlib + Xinerama + Xft, so it runs on any distro with Xorg.
+
+Keys
+	Super+arrows		snap ladder: halves, quarters, max, min
+	Super+Shift+Left/Right	move window to the next monitor
+	Alt+Tab, Alt+Shift+Tab	switcher; Q closes the highlighted window
+	Ctrl+Shift+W		close (terminals keep it for their tabs)
+	Alt+F4, Super+Q		close
+	Super+drag		move; drop on top = max, side = half, corner = quarter
+	Super+right drag	resize from the nearest edge/corner
+	Super (tap)		launcher; Enter runs the typed text if nothing matches.
+				Also lock, log out, suspend, restart, shut down.
+	window edges		drag just outside the focused window to resize
+	Ctrl+Alt+T		gnome-terminal
+	Super+Shift+T/A/V/S	ocrclip, askclaude, voicetoggle, screenshot
+	Super+L, Ctrl+Alt+L	lock (cinnamon-screensaver)
+	Ctrl+Alt+Delete		quit
+
+Bar
+	Bottom of each monitor: a button per window on that monitor (click
+	focuses, click the focused one minimizes) and a clock. The first one
+	also has status text and tray icons. The status text is the root
+	window name, set with xsetroot -name.
+
+No title bars; apps with their own (Chrome, GTK) drag as usual.
+Everything is configured at the top of nwm.c.
+
+Build and try
+	make
+	make run		nested in Xephyr on :3, the real session is untouched
+	sudo make install	adds "nwm" to the login screen, Cinnamon stays
+
+Startup
+	XDG autostart entries for "nwm:X-Cinnamon", so the same daemons and
+	tray apps as under Cinnamon. Then ~/.config/nwm/autostart if it is
+	executable; autostart.example adds the locker and the status text.
+	nwm -n (make run) starts nothing.
+
+Updating
+	kill -USR1 $(pidof nwm) restarts it in place, into whatever nwm is
+	first on PATH now; windows and tray icons stay.
+
+Not yet
+	Alt+Tab thumbnails, workspaces.

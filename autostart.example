@@ -1,0 +1,13 @@
+#!/bin/sh
+# Copy to ~/.config/nwm/autostart and chmod +x. nwm runs it once at start,
+# after the XDG autostart entries (Cinnamon's daemons, polkit, nm-applet,
+# blueman...), which it starts by itself.
+
+# Locker for Super+L and Ctrl+Alt+L; cinnamon-session normally starts it
+cinnamon-screensaver &
+
+# Bar status text: what the claude-usage and oslo-weather applets showed.
+while :; do
+	xsetroot -name "$(~/.local/bin/claude-usage 2>/dev/null)    $(~/.local/bin/oslo-weather 2>/dev/null)"
+	sleep 60
+done &

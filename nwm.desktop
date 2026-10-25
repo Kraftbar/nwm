@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=nwm
+Comment=Small X11 window manager
+Exec=nwm
+Type=Application
+DesktopNames=nwm;X-Cinnamon;
