@@ -7,7 +7,7 @@ Xlib + Xinerama + Xft, so it runs on any distro with Xorg.
 Keys
 	Super+arrows		snap ladder: halves, quarters, max, min
 	Super+Shift+Left/Right	move window to the next monitor
-	Alt+Tab, Alt+Shift+Tab	switcher; Q closes the highlighted window
+	Alt+Tab, Alt+Shift+Tab	switcher with thumbnails; Q closes the highlighted one
 	Ctrl+Shift+W		close (terminals keep it for their tabs)
 	Alt+F4, Super+Q		close
 	Super+drag		move; drop on top = max, side = half, corner = quarter
@@ -45,4 +45,4 @@ Updating
 	first on PATH now; windows and tray icons stay.
 
 Not yet
-	Alt+Tab thumbnails, workspaces.
+	display menu, workspaces.

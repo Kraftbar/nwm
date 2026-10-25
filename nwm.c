@@ -5,8 +5,8 @@
  *
  *   Super+arrows        the windows-snap ladder: halves, quarters, max, min
  *   Super+Shift+Left/Right  move the window to the next monitor
- *   Alt+Tab             MRU switcher, list shows at once, Q closes the
- *                       highlighted window, Esc cancels
+ *   Alt+Tab             MRU switcher with small live thumbnails, shows at
+ *                       once, Q closes the highlighted window, Esc cancels
  *   Ctrl+Shift+W        close, except in terminals, which keep it for tabs
  *   Alt+F4, Super+Q     close
  *   Super+drag          move; dropped on the top edge maximizes, on a side
@@ -48,7 +48,9 @@
 #include <X11/XKBlib.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
+#include <X11/extensions/Xcomposite.h>
 #include <X11/extensions/Xinerama.h>
+#include <X11/extensions/Xrender.h>
 #include <X11/Xft/Xft.h>
 
 #define BORDER		1
@@ -58,6 +60,7 @@
 #define COL_TAB_SEL	"#2f5f9e"
 #define COL_TAB_FG	"#e8e8e8"
 #define COL_TAB_DIM	"#8a8a8a"
+#define COL_TAB_BOX	"#2c2c2c"	/* behind a thumbnail */
 #define FONT		"sans:size=11"
 #define EDGE		2	/* px from a screen edge that count as on it */
 #define CORNER		48	/* px along an edge that count as its corner */
@@ -69,6 +72,8 @@
 #define MAXDOCKS	8
 #define MAXABOVE	16
 #define MAXTAB		24
+#define THUMBW		200	/* Alt+Tab thumbnail box */
+#define THUMBH		125
 #define MAXFALLBACK	8	/* fonts found for glyphs FONT lacks */
 #define MAXAPPS		1024
 #define LAUNCHROWS	10
@@ -215,6 +220,10 @@ struct client {
 	int state;
 	int minimized, fullscreen, fixed, noinput;
 	int ignoreunmap;	/* unmaps we did ourselves, to minimize */
+	int redirected;		/* contents kept offscreen, for thumbnails */
+	Pixmap thumb;		/* last thumbnail, kept for when minimized */
+	Picture thumbpic;
+	int hasthumb;
 	unsigned long seq;	/* order of mapping, for the bar */
 	struct client *next;	/* most recently focused first */
 };
@@ -273,7 +282,10 @@ static int nfallback;
 static FcChar32 nofont[32];	/* codepoints no font has, to stop looking */
 static int nnofont;
 static XftDraw *tabdraw;
-static XftColor xc_bg, xc_sel, xc_fg, xc_dim;
+static XftColor xc_bg, xc_sel, xc_fg, xc_dim, xc_box;
+static int composite;		/* Composite and Render are there */
+static Picture tabpic;
+static XRenderPictFormat *rootfmt;
 
 /* Launcher, in the same popup window as Alt+Tab */
 struct app {
@@ -296,6 +308,7 @@ static void focus(struct client *c);
 static void drawtab(void);
 static void endtab(struct client *c);
 static void placegrips(void);
+static int updatethumb(struct client *c);
 
 static void die(const char *msg)
 {
@@ -695,10 +708,29 @@ static void relayout(void)
 	updateworkarea();
 }
 
+/*
+ * Automatic redirection keeps a copy of the window's contents offscreen,
+ * which is where thumbnails come from, while the server still draws it
+ * on screen as usual. Fullscreen windows skip it: a game should go
+ * straight to the screen.
+ */
+static void redirect(struct client *c, int on)
+{
+	if (!composite || on == c->redirected)
+		return;
+	if (on)
+		XCompositeRedirectWindow(dpy, c->win, CompositeRedirectAutomatic);
+	else
+		XCompositeUnredirectWindow(dpy, c->win,
+					   CompositeRedirectAutomatic);
+	c->redirected = on;
+}
+
 static void setfullscreen(struct client *c, int on)
 {
 	int m = clientmon(c);
 
+	redirect(c, !on);
 	c->fullscreen = on;
 	c->bw = on ? 0 : BORDER;
 	XSetWindowBorderWidth(dpy, c->win, c->bw);
@@ -741,6 +773,8 @@ static void minimize(struct client *c)
 
 	if (c->minimized)
 		return;
+	/* unmapped, it has no contents: keep what it looked like */
+	updatethumb(c);
 	c->minimized = 1;
 	c->ignoreunmap++;
 	XUnmapWindow(dpy, c->win);
@@ -1024,6 +1058,7 @@ static void manage(Window w, XWindowAttributes *wa)
 
 	c->next = clients;
 	clients = c;
+	redirect(c, !c->fullscreen);
 	arrange(c, m);
 	updateclientlist();
 	XMapWindow(dpy, w);
@@ -1049,8 +1084,13 @@ static void unmanage(struct client *c, int destroyed)
 			tabsel = max(tabsel - 1, 0);
 	}
 
+	if (c->thumb) {
+		XRenderFreePicture(dpy, c->thumbpic);
+		XFreePixmap(dpy, c->thumb);
+	}
 	if (!destroyed) {
 		XGrabServer(dpy);
+		redirect(c, 0);
 		XUngrabButton(dpy, AnyButton, AnyModifier, c->win);
 		XSelectInput(dpy, c->win, NoEventMask);
 		setwmstate(c, WithdrawnState);
@@ -1498,11 +1538,65 @@ static void fittext(char *s, int maxw)
 	s[n] = '\0';
 }
 
+/*
+ * Scale what the window shows now into its thumbnail. Returns whether it
+ * has one, fresh or kept from before it was minimized.
+ */
+static int updatethumb(struct client *c)
+{
+	XRenderPictureAttributes pa = { .subwindow_mode = IncludeInferiors };
+	XWindowAttributes wa;
+	XRenderPictFormat *fmt;
+	XTransform xf = { { { 0 } } };
+	Picture src;
+	Pixmap pix;
+	double sc;
+	int tw, th;
+
+	if (!composite)
+		return 0;
+	if (!c->thumb) {
+		c->thumb = XCreatePixmap(dpy, root, THUMBW, THUMBH,
+					 DefaultDepth(dpy, scr));
+		c->thumbpic = XRenderCreatePicture(dpy, c->thumb, rootfmt, 0,
+						   NULL);
+	}
+	if (!c->redirected || c->minimized ||
+	    !XGetWindowAttributes(dpy, c->win, &wa) ||
+	    wa.map_state != IsViewable ||
+	    !(fmt = XRenderFindVisualFormat(dpy, wa.visual)))
+		return c->hasthumb;
+
+	pix = XCompositeNameWindowPixmap(dpy, c->win);
+	src = XRenderCreatePicture(dpy, pix, fmt, CPSubwindowMode, &pa);
+	sc = max(1.0, max((double)wa.width / THUMBW,
+			  (double)wa.height / THUMBH));
+	tw = wa.width / sc;
+	th = wa.height / sc;
+	xf.matrix[0][0] = XDoubleToFixed(sc);
+	xf.matrix[1][1] = XDoubleToFixed(sc);
+	xf.matrix[2][2] = XDoubleToFixed(1);
+	XRenderSetPictureTransform(dpy, src, &xf);
+	XRenderSetPictureFilter(dpy, src, FilterBilinear, NULL, 0);
+	XRenderFillRectangle(dpy, PictOpSrc, c->thumbpic, &xc_box.color, 0, 0,
+			     THUMBW, THUMBH);
+	XRenderComposite(dpy, PictOpSrc, src, None, c->thumbpic, 0, 0, 0, 0,
+			 (THUMBW - tw) / 2, (THUMBH - th) / 2, tw, th);
+	XRenderFreePicture(dpy, src);
+	XFreePixmap(dpy, pix);
+	c->hasthumb = 1;
+	return 1;
+}
+
+/* A card per window: thumbnail, title under it, in rows that fit. */
 static void drawtab(void)
 {
 	struct rect r = mons[sel ? clientmon(sel) : pointermon()];
-	int pad = 8, lh = font->ascent + font->descent + 12;
-	int w = min(max(r.w * 2 / 5, 360), r.w), h = ntab * lh + 2 * pad, i, y;
+	int pad = 10, lh = font->ascent + font->descent + 8;
+	int cw = THUMBW + 2 * pad, ch = THUMBH + lh + 2 * pad;
+	int cols = max(min(ntab, (r.w - 4 * pad) / cw), 1);
+	int rows = (ntab + cols - 1) / cols;
+	int w = cols * cw + 2 * pad, h = rows * ch + 2 * pad, i, x, y;
 	char title[512];
 
 	XMoveResizeWindow(dpy, tabwin, r.x + (r.w - w) / 2,
@@ -1510,16 +1604,25 @@ static void drawtab(void)
 	XMapRaised(dpy, tabwin);
 	XftDrawRect(tabdraw, &xc_bg, 0, 0, w, h);
 	for (i = 0; i < ntab; i++) {
-		y = pad + i * lh;
+		x = pad + i % cols * cw;
+		y = pad + i / cols * ch;
 		if (i == tabsel)
-			XftDrawRect(tabdraw, &xc_sel, pad / 2, y, w - pad, lh);
+			XftDrawRect(tabdraw, &xc_sel, x, y, cw, ch);
+		if (updatethumb(tab[i]))
+			XRenderComposite(dpy, PictOpSrc, tab[i]->thumbpic, None,
+					 tabpic, 0, 0, 0, 0, x + pad, y + pad,
+					 THUMBW, THUMBH);
+		else
+			XftDrawRect(tabdraw, &xc_box, x + pad, y + pad,
+				    THUMBW, THUMBH);
 		gettitle(tab[i]->win, title, sizeof(title));
 		if (!*title)
 			strcpy(title, "(untitled)");
-		fittext(title, w - 4 * pad);
+		fittext(title, THUMBW);
 		drawtext(tabdraw, tab[i]->minimized && i != tabsel ?
-			 &xc_dim : &xc_fg, 2 * pad,
-			 y + (lh + font->ascent - font->descent) / 2, title);
+			 &xc_dim : &xc_fg, x + pad,
+			 y + pad + THUMBH + (lh + font->ascent - font->descent) / 2,
+			 title);
 	}
 }
 
@@ -2540,6 +2643,22 @@ static void xftcolor(XftColor *c, const char *name)
 		die("nwm: cannot allocate a colour\n");
 }
 
+/* NameWindowPixmap needs Composite 0.2; without it Alt+Tab has no thumbnails. */
+static void initcomposite(void)
+{
+	int ev, err, major = 0, minor = 2;
+
+	if (!XCompositeQueryExtension(dpy, &ev, &err) ||
+	    !XCompositeQueryVersion(dpy, &major, &minor) ||
+	    (major == 0 && minor < 2) || !XRenderQueryExtension(dpy, &ev, &err))
+		return;
+	rootfmt = XRenderFindVisualFormat(dpy, DefaultVisual(dpy, scr));
+	if (!rootfmt)
+		return;
+	tabpic = XRenderCreatePicture(dpy, tabwin, rootfmt, 0, NULL);
+	composite = 1;
+}
+
 static void creategrips(void)
 {
 	static const unsigned int shapes[8] = {
@@ -2614,6 +2733,7 @@ static void setup(void)
 	xftcolor(&xc_sel, COL_TAB_SEL);
 	xftcolor(&xc_fg, COL_TAB_FG);
 	xftcolor(&xc_dim, COL_TAB_DIM);
+	xftcolor(&xc_box, COL_TAB_BOX);
 	wa.override_redirect = True;
 	wa.background_pixel = xc_bg.pixel;
 	wa.event_mask = ExposureMask;
@@ -2623,6 +2743,7 @@ static void setup(void)
 			       &wa);
 	tabdraw = XftDrawCreate(dpy, tabwin, DefaultVisual(dpy, scr),
 				DefaultColormap(dpy, scr));
+	initcomposite();
 	placebars();
 	if (nbars)
 		traystart();
@@ -2672,6 +2793,8 @@ static void cleanup(void)
 		unmanage(clients, 0);
 	}
 	XUngrabKey(dpy, AnyKey, AnyModifier, root);
+	if (composite)
+		XRenderFreePicture(dpy, tabpic);
 	XftDrawDestroy(tabdraw);
 	XDestroyWindow(dpy, tabwin);
 	/*
