@@ -14,8 +14,8 @@
  *   Super+right drag    resize from the nearest edge or corner
  *   bar                 a button per window (click focuses, or minimizes
  *                       the focused one), the root window name as status
- *                       text (xsetroot -name), tray icons, a clock and a
- *                       power button; hidden until the pointer touches the
+ *                       text (xsetroot -name), tray icons, battery, a
+ *                       clock and a power button; hidden until the pointer touches the
  *                       bottom edge
  *   Super, tapped       launcher, and again to close it: type, Enter starts
  *                       the top match, or runs what was typed when nothing
@@ -87,6 +87,8 @@
 #define HIDEDELAY	400	/* ms after the pointer leaves it */
 #define CLOCK		"%a %d %b  %H:%M"
 #define POWER		"\u23fb"	/* the bar's power button */
+#define CHARGING	"\u26a1"	/* before the battery level, on AC */
+#define PSU		"/sys/class/power_supply"
 #define TRAYSZ		20	/* tray icon size, square */
 #define MAXTRAY		16
 
@@ -1828,11 +1830,62 @@ static void placebars(void)
 	bardirty = 1;
 }
 
+/*
+ * "48%", or with CHARGING in front while on AC; empty without a battery.
+ * Several batteries are averaged. Read fresh at every draw, which the
+ * clock makes at least once a minute.
+ */
+static void battery(char *buf, size_t size)
+{
+	char path[PATH_MAX], v[32];
+	struct dirent *e;
+	int sum = 0, n = 0, ac = 0;
+	FILE *f;
+	DIR *d;
+
+	buf[0] = '\0';
+	if (!(d = opendir(PSU)))
+		return;
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), PSU "/%s/type", e->d_name);
+		if (!(f = fopen(path, "r")))
+			continue;
+		v[0] = '\0';
+		if (!fgets(v, sizeof(v), f))
+			v[0] = '\0';
+		fclose(f);
+		if (!strncmp(v, "Battery", 7))
+			snprintf(path, sizeof(path), PSU "/%s/capacity",
+				 e->d_name);
+		else if (!strncmp(v, "Mains", 5))
+			snprintf(path, sizeof(path), PSU "/%s/online",
+				 e->d_name);
+		else
+			continue;
+		if (!(f = fopen(path, "r")))
+			continue;
+		if (fgets(v, sizeof(v), f)) {
+			if (strstr(path, "/capacity")) {
+				sum += atoi(v);
+				n++;
+			} else {
+				ac |= atoi(v);
+			}
+		}
+		fclose(f);
+	}
+	closedir(d);
+	if (n)
+		snprintf(buf, size, "%s%d%%", ac ? CHARGING : "", sum / n);
+}
+
 static void drawonebar(int m)
 {
 	struct bar *b = &bars[m];
 	struct client *c, *list[MAXTAB], *t;
-	char status[512], line[512], clk[64];
+	char status[512], line[512], clk[64], bat[32];
 	int pad = 8, n = 0, i, j, x, w, right;
 	int base = (BARH + font->ascent - font->descent) / 2;
 	int bw = mons[m].w;
@@ -1848,6 +1901,12 @@ static void drawonebar(int m)
 	right = b->powerx - textrun(NULL, NULL, 0, 0, clk, strlen(clk));
 	drawtext(b->draw, &xc_fg, right, base, clk);
 	right -= pad;
+	battery(bat, sizeof(bat));
+	if (*bat) {
+		right -= pad + textrun(NULL, NULL, 0, 0, bat, strlen(bat));
+		drawtext(b->draw, &xc_fg, right, base, bat);
+		right -= pad;
+	}
 	for (i = ntray - 1; m == 0 && i >= 0; i--) {
 		if (!tray[i].mapped)
 			continue;

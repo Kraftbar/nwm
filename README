@@ -24,7 +24,8 @@ Keys
 Bar
 	Bottom of each monitor, hidden until the pointer touches the bottom
 	edge (AUTOHIDE in nwm.c). A button per window on that monitor (click
-	focuses, click the focused one minimizes), a clock and a power button
+	focuses, click the focused one minimizes), battery level (⚡ on AC), a
+	clock and a power button
 	(lock, log out, suspend, restart, shut down). The first one
 	also has status text and tray icons. The status text is the root
 	window name, set with xsetroot -name.
