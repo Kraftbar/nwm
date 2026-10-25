@@ -11,6 +11,8 @@ Keys
 	Ctrl+Shift+W		close (terminals keep it for their tabs)
 	Alt+F4, Super+Q		close
 	Super+drag		move; drop on top = max, side = half, corner = quarter
+	snap assist		snap to an empty half and the other windows show in the
+				other half; click one, or arrows and Enter, to fill it
 	Super+right drag	resize from the nearest edge/corner
 	Super (tap)		launcher, tap again to close; Enter runs the typed text if
 				nothing matches.

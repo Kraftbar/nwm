@@ -11,6 +11,8 @@
  *   Alt+F4, Super+Q     close
  *   Super+drag          move; dropped on the top edge maximizes, on a side
  *                       edge takes that half
+ *   snap assist         a window snapped to an empty half offers the other
+ *                       windows for the other half
  *   Super+right drag    resize from the nearest edge or corner
  *   bar                 a button per window (click focuses, or minimizes
  *                       the focused one), the root window name as status
@@ -291,6 +293,9 @@ static int ntray;
 /* Alt+Tab */
 static struct client *tab[MAXTAB];
 static int ntab, tabsel, tabbing;
+static int tabassist, assistzone, assistmon;	/* the cards as snap assist */
+static struct rect cards[MAXTAB];		/* where drawtab put them */
+static int tabx, taby;
 static XftFont *font, *fallback[MAXFALLBACK];
 static int nfallback;
 static FcChar32 nofont[32];	/* codepoints no font has, to stop looking */
@@ -325,6 +330,7 @@ static void endtab(struct client *c);
 static void placegrips(void);
 static int updatethumb(struct client *c);
 static void launchstart(int session);
+static void assiststart(struct client *c);
 
 static void die(const char *msg)
 {
@@ -826,6 +832,8 @@ static void snap(struct client *c, int dir)
 	}
 	c->state = next;
 	arrange(c, clientmon(c));
+	if (next == LEFT || next == RIGHT)
+		assiststart(c);
 }
 
 static void movemon(struct client *c, int dir)
@@ -1267,6 +1275,8 @@ static void dropsnap(struct client *c, int x, int y)
 		return;
 	c->state = st;
 	arrange(c, nearmon(x, y));
+	if (st == LEFT || st == RIGHT)
+		assiststart(c);
 }
 
 static void movemouse(struct client *c, int px, int py)
@@ -1607,7 +1617,8 @@ static int updatethumb(struct client *c)
 /* A card per window: thumbnail, title under it, in rows that fit. */
 static void drawtab(void)
 {
-	struct rect r = mons[sel ? clientmon(sel) : pointermon()];
+	struct rect r = tabassist ? zonerect(assistzone, assistmon) :
+			mons[sel ? clientmon(sel) : pointermon()];
 	int pad = 10, lh = font->ascent + font->descent + 8;
 	int cw = THUMBW + 2 * pad, ch = THUMBH + lh + 2 * pad;
 	int cols = max(min(ntab, (r.w - 4 * pad) / cw), 1);
@@ -1615,13 +1626,15 @@ static void drawtab(void)
 	int w = cols * cw + 2 * pad, h = rows * ch + 2 * pad, i, x, y;
 	char title[512];
 
-	XMoveResizeWindow(dpy, tabwin, r.x + (r.w - w) / 2,
-			  r.y + (r.h - h) / 2, w, h);
+	tabx = r.x + (r.w - w) / 2;
+	taby = r.y + (r.h - h) / 2;
+	XMoveResizeWindow(dpy, tabwin, tabx, taby, w, h);
 	XMapRaised(dpy, tabwin);
 	XftDrawRect(tabdraw, &xc_bg, 0, 0, w, h);
 	for (i = 0; i < ntab; i++) {
 		x = pad + i % cols * cw;
 		y = pad + i / cols * ch;
+		cards[i] = (struct rect){ tabx + x, taby + y, cw, ch };
 		if (i == tabsel)
 			XftDrawRect(tabdraw, &xc_sel, x, y, cw, ch);
 		if (updatethumb(tab[i]))
@@ -1675,11 +1688,109 @@ static void tabstart(int step)
 
 static void endtab(struct client *c)
 {
-	tabbing = 0;
+	int assist = tabassist;
+
+	tabbing = tabassist = 0;
 	XUngrabKeyboard(dpy, CurrentTime);
+	if (assist)
+		XUngrabPointer(dpy, CurrentTime);
 	XUnmapWindow(dpy, tabwin);
-	if (c)
-		focus(c);
+	if (!c)
+		return;
+	focus(c);
+	if (assist && !c->fixed) {
+		c->state = assistzone;
+		arrange(c, assistmon);
+	}
+}
+
+/*
+ * Snap assist, as in Windows: c just took one half, and if nothing has the
+ * other, the other windows show there as cards. The one picked, by
+ * click or arrows and Enter, takes that half.
+ */
+static void assiststart(struct client *c)
+{
+	struct client *t;
+	int m = clientmon(c), other = c->state == LEFT ? RIGHT : LEFT;
+
+	if (tabbing || launching)
+		return;
+	for (t = clients; t; t = t->next)
+		if (t != c && !t->minimized && t->state == other &&
+		    clientmon(t) == m)
+			return;
+	ntab = 0;
+	for (t = clients; t && ntab < MAXTAB; t = t->next)
+		if (t != c && !t->fixed && !t->fullscreen && !find(t->transfor))
+			tab[ntab++] = t;
+	if (!ntab)
+		return;
+	if (XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync,
+			  CurrentTime) != GrabSuccess)
+		return;
+	/* every click comes here: on a card it picks, elsewhere it cancels */
+	if (XGrabPointer(dpy, root, False, ButtonPressMask, GrabModeAsync,
+			 GrabModeAsync, None, cur_normal,
+			 CurrentTime) != GrabSuccess) {
+		XUngrabKeyboard(dpy, CurrentTime);
+		return;
+	}
+	tabbing = tabassist = 1;
+	assistzone = other;
+	assistmon = m;
+	tabsel = 0;
+	drawtab();
+}
+
+/*
+ * Keys while snap assist shows. Returns 0 for a key it does not take,
+ * which also puts it away, so Super+arrow and the rest carry on as usual.
+ */
+static int assistkey(KeySym sym, unsigned int state)
+{
+	if (IsModifierKey(sym))
+		return 1;
+	if (state & SUPER) {
+		endtab(NULL);
+		return 0;
+	}
+	switch (sym) {
+	case XK_Right:
+	case XK_Down:
+	case XK_Tab:
+		tabsel = (tabsel + (state & ShiftMask ? -1 : 1) + ntab) % ntab;
+		drawtab();
+		return 1;
+	case XK_Left:
+	case XK_Up:
+		tabsel = (tabsel - 1 + ntab) % ntab;
+		drawtab();
+		return 1;
+	case XK_Return:
+	case XK_KP_Enter:
+	case XK_space:
+		endtab(tab[tabsel]);
+		return 1;
+	case XK_Escape:
+		endtab(NULL);
+		return 1;
+	}
+	endtab(NULL);
+	return 0;
+}
+
+static void assistclick(int x, int y)
+{
+	int i;
+
+	for (i = 0; i < ntab; i++)
+		if (x >= cards[i].x && x < cards[i].x + cards[i].w &&
+		    y >= cards[i].y && y < cards[i].y + cards[i].h) {
+			endtab(tab[i]);
+			return;
+		}
+	endtab(NULL);
 }
 
 static void tabkey(KeySym sym, unsigned int state)
@@ -2469,6 +2580,10 @@ static void buttonpress(XEvent *e)
 
 	/* Super+drag is not a tap on Super */
 	superalone = 0;
+	if (tabbing && tabassist) {
+		assistclick(ev->x_root, ev->y_root);
+		return;
+	}
 	if ((b = findbar(ev->window))) {
 		if (ev->button == Button1)
 			barclick(b, ev->x);
@@ -2573,10 +2688,12 @@ static void keypress(XEvent *e)
 	unsigned int mod = cleanmask(ev->state);
 	size_t i;
 
-	if (tabbing) {
+	if (tabbing && !tabassist) {
 		tabkey(sym, ev->state);
 		return;
 	}
+	if (tabbing && assistkey(sym, ev->state))
+		return;
 	if (launching) {
 		launchkey(ev);
 		return;
@@ -2632,7 +2749,7 @@ static void keyrelease(XEvent *e)
 {
 	KeySym sym = XkbKeycodeToKeysym(dpy, e->xkey.keycode, 0, 0);
 
-	if (tabbing && isaltkey(e->xkey.keycode)) {
+	if (tabbing && !tabassist && isaltkey(e->xkey.keycode)) {
 		endtab(ntab ? tab[tabsel] : NULL);
 	} else if (superalone && (sym == XK_Super_L || sym == XK_Super_R)) {
 		superalone = 0;
