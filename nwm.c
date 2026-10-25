@@ -83,6 +83,7 @@
 #define TERMINAL	"gnome-terminal --"	/* for Terminal=true apps */
 #define BARH		28	/* bottom bar on each monitor; 0 for none */
 #define BARBTN		220	/* widest a window button gets */
+#define BARGAP		14	/* between the things on the right */
 #define AUTOHIDE	1	/* bar shows at the bottom edge; 0 keeps it up */
 #define HIDEDELAY	400	/* ms after the pointer leaves it */
 #define CLOCK		"%a %d %b  %H:%M"
@@ -1893,40 +1894,45 @@ static void drawonebar(int m)
 
 	XftDrawRect(b->draw, &xc_bg, 0, 0, bw, BARH);
 
-	/* right to left: the clock, then on the first bar tray and status */
-	b->powerx = bw - 2 * pad - textrun(NULL, NULL, 0, 0, POWER,
-					    strlen(POWER));
-	drawtext(b->draw, &xc_fg, b->powerx + pad, base, POWER);
+	/*
+	 * right to left, BARGAP apart: power button, clock, battery, then on
+	 * the first bar tray icons and status. Icons are drawn smaller than
+	 * their window, so they sit a little closer.
+	 */
+	right = bw - BARGAP - textrun(NULL, NULL, 0, 0, POWER, strlen(POWER));
+	drawtext(b->draw, &xc_fg, right, base, POWER);
+	b->powerx = right - BARGAP / 2;
 	strftime(clk, sizeof(clk), CLOCK, localtime(&now));
-	right = b->powerx - textrun(NULL, NULL, 0, 0, clk, strlen(clk));
+	right -= BARGAP + textrun(NULL, NULL, 0, 0, clk, strlen(clk));
 	drawtext(b->draw, &xc_fg, right, base, clk);
-	right -= pad;
 	battery(bat, sizeof(bat));
 	if (*bat) {
-		right -= pad + textrun(NULL, NULL, 0, 0, bat, strlen(bat));
+		right -= BARGAP + textrun(NULL, NULL, 0, 0, bat, strlen(bat));
 		drawtext(b->draw, &xc_fg, right, base, bat);
-		right -= pad;
 	}
+	right -= BARGAP - 4;
 	for (i = ntray - 1; m == 0 && i >= 0; i--) {
 		if (!tray[i].mapped)
 			continue;
-		right -= TRAYSZ + 4;
+		right -= TRAYSZ;
 		if (tray[i].x != right) {
 			tray[i].x = right;
 			XMoveResizeWindow(dpy, tray[i].win, right,
 					  (BARH - TRAYSZ) / 2, TRAYSZ, TRAYSZ);
 		}
+		right -= BARGAP / 2 - 4;
 	}
+	right -= 4;
 	if (m == 0) {
 		gettitle(root, status, sizeof(status));
 		if (*status) {
 			fittext(status, bw / 3);
-			right -= pad + textrun(NULL, NULL, 0, 0, status,
-					       strlen(status));
+			right -= BARGAP + textrun(NULL, NULL, 0, 0, status,
+						  strlen(status));
 			drawtext(b->draw, &xc_fg, right, base, status);
 		}
 	}
-	right -= pad;
+	right -= BARGAP;
 
 	/*
 	 * left: a button per window on this monitor, in the order they

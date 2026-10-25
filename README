@@ -44,6 +44,12 @@ Startup
 	executable; autostart.example adds the locker and the status text.
 	nwm -n (make run) starts nothing.
 
+Tray icons
+	Symbolic icons are drawn in the bar's text colour. blueman asks for
+	blueman-tray-symbolic, which Mint-Y lacks; link Adwaita's bluetooth
+	ones under ~/.local/share/icons/hicolor/scalable/status/ as
+	blueman-{tray,active,disabled}-symbolic.svg.
+
 Updating
 	kill -USR1 $(pidof nwm) restarts it in place, into whatever nwm is
 	first on PATH now; windows and tray icons stay.
