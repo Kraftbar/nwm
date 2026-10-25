@@ -295,6 +295,8 @@ static struct client *tab[MAXTAB];
 static int ntab, tabsel, tabbing;
 static int tabassist, assistzone, assistmon;	/* the cards as snap assist */
 static struct rect cards[MAXTAB];		/* where drawtab put them */
+static Pixmap assistbg;				/* the half, dimmed, behind them */
+static Picture assistbgpic;
 static int tabx, taby;
 static XftFont *font, *fallback[MAXFALLBACK];
 static int nfallback;
@@ -1624,16 +1626,30 @@ static void drawtab(void)
 	int cols = max(min(ntab, (r.w - 4 * pad) / cw), 1);
 	int rows = (ntab + cols - 1) / cols;
 	int w = cols * cw + 2 * pad, h = rows * ch + 2 * pad, i, x, y;
+	int ox = pad, oy = pad;
 	char title[512];
 
+	/* snap assist covers its whole half, the cards centred on it */
+	if (tabassist) {
+		ox = (r.w - w) / 2 + pad;
+		oy = (r.h - h) / 2 + pad;
+		w = r.w;
+		h = r.h;
+	}
 	tabx = r.x + (r.w - w) / 2;
 	taby = r.y + (r.h - h) / 2;
 	XMoveResizeWindow(dpy, tabwin, tabx, taby, w, h);
 	XMapRaised(dpy, tabwin);
-	XftDrawRect(tabdraw, &xc_bg, 0, 0, w, h);
+	if (tabassist && assistbgpic)
+		XRenderComposite(dpy, PictOpSrc, assistbgpic, None, tabpic,
+				 0, 0, 0, 0, 0, 0, w, h);
+	else
+		XftDrawRect(tabdraw, &xc_bg, 0, 0, w, h);
 	for (i = 0; i < ntab; i++) {
-		x = pad + i % cols * cw;
-		y = pad + i / cols * ch;
+		x = ox + i % cols * cw;
+		y = oy + i / cols * ch;
+		if (tabassist && i != tabsel)
+			XftDrawRect(tabdraw, &xc_bg, x, y, cw, ch);
 		cards[i] = (struct rect){ tabx + x, taby + y, cw, ch };
 		if (i == tabsel)
 			XftDrawRect(tabdraw, &xc_sel, x, y, cw, ch);
@@ -1694,6 +1710,11 @@ static void endtab(struct client *c)
 	XUngrabKeyboard(dpy, CurrentTime);
 	if (assist)
 		XUngrabPointer(dpy, CurrentTime);
+	if (assistbg) {
+		XRenderFreePicture(dpy, assistbgpic);
+		XFreePixmap(dpy, assistbg);
+		assistbg = assistbgpic = 0;
+	}
 	XUnmapWindow(dpy, tabwin);
 	if (!c)
 		return;
@@ -1702,6 +1723,29 @@ static void endtab(struct client *c)
 		c->state = assistzone;
 		arrange(c, assistmon);
 	}
+}
+
+/*
+ * Copy what the screen shows in r, darkened, for snap assist to sit on.
+ * There is no compositor to blur with, but a dimmed half reads clearly
+ * as "pick one for here".
+ */
+static void dimhalf(struct rect r)
+{
+	XRenderPictureAttributes pa = { .subwindow_mode = IncludeInferiors };
+	XRenderColor shade = { 0, 0, 0, 0xa000 };
+	Picture src;
+
+	if (!composite)
+		return;
+	assistbg = XCreatePixmap(dpy, root, r.w, r.h, DefaultDepth(dpy, scr));
+	assistbgpic = XRenderCreatePicture(dpy, assistbg, rootfmt, 0, NULL);
+	src = XRenderCreatePicture(dpy, root, rootfmt, CPSubwindowMode, &pa);
+	XRenderComposite(dpy, PictOpSrc, src, None, assistbgpic, r.x, r.y,
+			 0, 0, 0, 0, r.w, r.h);
+	XRenderFreePicture(dpy, src);
+	XRenderFillRectangle(dpy, PictOpOver, assistbgpic, &shade, 0, 0,
+			     r.w, r.h);
 }
 
 /*
@@ -1740,6 +1784,7 @@ static void assiststart(struct client *c)
 	assistzone = other;
 	assistmon = m;
 	tabsel = 0;
+	dimhalf(zonerect(other, m));
 	drawtab();
 }
 
