@@ -14,7 +14,8 @@
  *   Super+right drag    resize from the nearest edge or corner
  *   bar                 a button per window (click focuses, or minimizes
  *                       the focused one), the root window name as status
- *                       text (xsetroot -name), tray icons and a clock
+ *                       text (xsetroot -name), tray icons and a clock;
+ *                       hidden until the pointer touches the bottom edge
  *   Super, tapped       launcher: type, Enter starts the top match, or
  *                       runs what was typed when nothing matches; also
  *                       has lock, log out, suspend, restart, shut down
@@ -53,7 +54,7 @@
 #include <X11/extensions/Xrender.h>
 #include <X11/Xft/Xft.h>
 
-#define BORDER		1
+#define BORDER		0	/* px around windows, coloured by focus */
 #define COL_FOCUS	"#5294e2"
 #define COL_NORMAL	"#3a3a3a"
 #define COL_TAB_BG	"#202020"
@@ -69,7 +70,7 @@
 #define DESKTOP		"nwm:X-Cinnamon"	/* XDG_CURRENT_DESKTOP default */
 #define MINSIZE		64	/* smallest a window can be dragged down to */
 #define MAXMONS		8
-#define MAXDOCKS	8
+#define MAXDOCKS	24	/* other docks, plus each bar and its trigger */
 #define MAXABOVE	16
 #define MAXTAB		24
 #define THUMBW		200	/* Alt+Tab thumbnail box */
@@ -80,6 +81,8 @@
 #define TERMINAL	"gnome-terminal --"	/* for Terminal=true apps */
 #define BARH		28	/* bottom bar on each monitor; 0 for none */
 #define BARBTN		220	/* widest a window button gets */
+#define AUTOHIDE	1	/* bar shows at the bottom edge; 0 keeps it up */
+#define HIDEDELAY	400	/* ms after the pointer leaves it */
 #define CLOCK		"%a %d %b  %H:%M"
 #define TRAYSZ		20	/* tray icon size, square */
 #define MAXTRAY		16
@@ -256,6 +259,8 @@ static unsigned long nextseq;
 /* Bars, one per monitor; the first one owns the tray */
 static struct bar {
 	Window win;
+	Window trigger;		/* 1px along the bottom edge, while hidden */
+	int shown;
 	XftDraw *draw;
 	struct {
 		int x, w;
@@ -264,6 +269,7 @@ static struct bar {
 	int nbtn;
 } bars[MAXMONS];
 static int nbars, bardirty;
+static long long hideat;	/* ms, monotonic; 0 when no hide is due */
 #define TRAYWIN		(bars[0].win)
 
 /* System tray: XEmbed icons living in the bar window */
@@ -1691,16 +1697,74 @@ static struct bar *findbar(Window w)
 	return NULL;
 }
 
+static long long nowms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
+}
+
 /*
- * A bar along the bottom of every monitor, reserving its space like any
- * dock would, so zones and maximize stop above it. The first one also
- * holds the tray, so it is never the one to go when monitors do.
+ * Hidden bars sit above the root window, off every monitor, rather than
+ * being unmapped: an unmap would look like a dock going away. While a bar
+ * is up its trigger is moved off as well, so the bottom pixel row still
+ * clicks the bar.
+ */
+static void showbar(struct bar *b, int on)
+{
+	struct rect m = mons[b - bars];
+
+	b->shown = on;
+	XMoveWindow(dpy, b->win, m.x, on ? m.y + m.h - BARH : -2 * BARH);
+	if (b->trigger)
+		XMoveWindow(dpy, b->trigger, m.x, on ? -2 * BARH :
+			    m.y + m.h - 1);
+	XRaiseWindow(dpy, on ? b->win : b->trigger);
+}
+
+/* The hide delay ran out: put away the bars the pointer is not on. */
+static void autohide(void)
+{
+	Window dw;
+	int x, y, di, i;
+	unsigned int mask;
+	struct rect m;
+
+	XQueryPointer(dpy, root, &dw, &dw, &x, &y, &di, &di, &mask);
+	for (i = 0; i < nbars; i++) {
+		m = mons[i];
+		if (bars[i].shown && !(x >= m.x && x < m.x + m.w &&
+				       y >= m.y + m.h - BARH && y < m.y + m.h))
+			showbar(&bars[i], 0);
+	}
+}
+
+static void adddock(Window w, long bottom, long x1, long x2)
+{
+	struct dock *d = finddock(w);
+
+	if (!d && ndocks < MAXDOCKS)
+		d = &docks[ndocks++];
+	if (!d)
+		return;
+	memset(d, 0, sizeof(*d));
+	d->win = w;
+	d->strut[3] = bottom;
+	d->strut[10] = x1;
+	d->strut[11] = x2;
+}
+
+/*
+ * A bar along the bottom of every monitor. Kept up, it reserves its space
+ * like any dock would, so zones and maximize stop above it; hiding, it
+ * reserves nothing. The first one also holds the tray, so it is never the
+ * one to go when monitors do.
  */
 static void placebars(void)
 {
 	XSetWindowAttributes wa = { 0 };
 	struct bar *b;
-	struct dock *d;
 	struct rect m;
 	int i;
 
@@ -1709,17 +1773,21 @@ static void placebars(void)
 	while (nbars > nmons) {
 		b = &bars[--nbars];
 		removedock(b->win);
+		removedock(b->trigger);
 		XftDrawDestroy(b->draw);
 		XDestroyWindow(dpy, b->win);
+		if (b->trigger)
+			XDestroyWindow(dpy, b->trigger);
 		memset(b, 0, sizeof(*b));
 	}
 	wa.override_redirect = True;
-	wa.background_pixel = xc_bg.pixel;
-	wa.event_mask = ExposureMask | ButtonPressMask;
 	for (i = 0; i < nmons; i++) {
 		b = &bars[i];
 		m = mons[i];
 		if (!b->win) {
+			wa.background_pixel = xc_bg.pixel;
+			wa.event_mask = ExposureMask | ButtonPressMask |
+					EnterWindowMask | LeaveWindowMask;
 			b->win = XCreateWindow(dpy, root, 0, 0, 1, 1, 0,
 					       CopyFromParent, InputOutput,
 					       CopyFromParent,
@@ -1728,19 +1796,27 @@ static void placebars(void)
 			b->draw = XftDrawCreate(dpy, b->win,
 						DefaultVisual(dpy, scr),
 						DefaultColormap(dpy, scr));
-			XMapRaised(dpy, b->win);
+			if (AUTOHIDE) {
+				wa.event_mask = EnterWindowMask;
+				b->trigger = XCreateWindow(dpy, root, 0, 0, 1,
+							   1, 0, 0, InputOnly,
+							   CopyFromParent,
+							   CWOverrideRedirect |
+							   CWEventMask, &wa);
+				XMapWindow(dpy, b->trigger);
+			}
+			XMapWindow(dpy, b->win);
 			nbars = i + 1;
 		}
-		XMoveResizeWindow(dpy, b->win, m.x, m.y + m.h - BARH, m.w, BARH);
-		if (!(d = finddock(b->win)) && ndocks < MAXDOCKS)
-			d = &docks[ndocks++];
-		if (!d)
-			continue;
-		memset(d, 0, sizeof(*d));
-		d->win = b->win;
-		d->strut[3] = sh - (m.y + m.h - BARH);
-		d->strut[10] = m.x;
-		d->strut[11] = m.x + m.w - 1;
+		XResizeWindow(dpy, b->win, m.w, BARH);
+		if (b->trigger)
+			XResizeWindow(dpy, b->trigger, m.w, 1);
+		showbar(b, !AUTOHIDE || b->shown);
+		/* in the dock list either way, to be kept on top */
+		adddock(b->win, AUTOHIDE ? 0 : sh - (m.y + m.h - BARH),
+			m.x, m.x + m.w - 1);
+		if (b->trigger)
+			adddock(b->trigger, 0, 0, 0);
 	}
 	bardirty = 1;
 }
@@ -2532,6 +2608,7 @@ static void unmapnotify(XEvent *e)
 static void handle(XEvent *ev)
 {
 	struct client *c;
+	int i;
 
 	switch (ev->type) {
 	case ButtonPress:
@@ -2581,6 +2658,21 @@ static void handle(XEvent *ev)
 			drawtab();
 		else if (launching)
 			drawlaunch();
+		break;
+	case EnterNotify:
+		for (i = 0; i < nbars; i++) {
+			if (ev->xcrossing.window == bars[i].trigger)
+				showbar(&bars[i], 1);
+			if (ev->xcrossing.window == bars[i].trigger ||
+			    ev->xcrossing.window == bars[i].win)
+				hideat = 0;
+		}
+		break;
+	case LeaveNotify:
+		/* into a tray icon is not leaving */
+		if (AUTOHIDE && findbar(ev->xcrossing.window) &&
+		    ev->xcrossing.detail != NotifyInferior)
+			hideat = nowms() + HIDEDELAY;
 		break;
 	case KeyPress:
 		keypress(ev);
@@ -2810,6 +2902,8 @@ static void cleanup(void)
 	while (nbars--) {
 		XftDrawDestroy(bars[nbars].draw);
 		XDestroyWindow(dpy, bars[nbars].win);
+		if (bars[nbars].trigger)
+			XDestroyWindow(dpy, bars[nbars].trigger);
 	}
 	XDestroyWindow(dpy, checkwin);
 	XDeleteProperty(dpy, root, atom[NET_ACTIVE_WINDOW]);
@@ -2825,18 +2919,30 @@ static void quit(int sig)
 	restarting = sig == SIGUSR1;
 }
 
-/* Wait for X, or for the clock to need redrawing; 0 on the clock. */
+/*
+ * Wait for X, for the clock to need redrawing, or for a bar to be due to
+ * hide. 0 when it was a timer.
+ */
 static int waitevent(void)
 {
 	int fd = ConnectionNumber(dpy);
-	struct timeval tv = { 60 - time(NULL) % 60, 0 };
+	long long ms = (60 - time(NULL) % 60) * 1000LL;
+	struct timeval tv;
 	fd_set fds;
 
+	if (hideat)
+		ms = max(min(ms, hideat - nowms()), 0);
+	tv.tv_sec = ms / 1000;
+	tv.tv_usec = ms % 1000 * 1000;
 	FD_ZERO(&fds);
 	FD_SET(fd, &fds);
 	XFlush(dpy);
 	if (select(fd + 1, &fds, NULL, NULL, &tv) > 0)
 		return 1;
+	if (hideat && nowms() >= hideat) {
+		hideat = 0;
+		autohide();
+	}
 	bardirty = 1;
 	return 0;
 }

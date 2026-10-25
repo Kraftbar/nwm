@@ -21,7 +21,8 @@ Keys
 	Ctrl+Alt+Delete		quit
 
 Bar
-	Bottom of each monitor: a button per window on that monitor (click
+	Bottom of each monitor, hidden until the pointer touches the bottom
+	edge (AUTOHIDE in nwm.c). A button per window on that monitor (click
 	focuses, click the focused one minimizes) and a clock. The first one
 	also has status text and tray icons. The status text is the root
 	window name, set with xsetroot -name.
