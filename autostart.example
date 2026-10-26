@@ -3,6 +3,16 @@
 # after the XDG autostart entries (Cinnamon's daemons, polkit, nm-applet,
 # blueman...), which it starts by itself.
 
+# Touchpad as set in Cinnamon's settings: Cinnamon applies these itself,
+# so under nwm nothing else would.
+tp=org.cinnamon.desktop.peripherals.touchpad
+ns=$([ "$(gsettings get $tp natural-scroll)" = true ] && echo 1 || echo 0)
+tap=$([ "$(gsettings get $tp tap-to-click)" = true ] && echo 1 || echo 0)
+xinput list --name-only | grep -i touchpad | while read -r dev; do
+	xinput set-prop "$dev" "libinput Natural Scrolling Enabled" $ns
+	xinput set-prop "$dev" "libinput Tapping Enabled" $tap
+done
+
 # Locker for Super+L and Ctrl+Alt+L; cinnamon-session normally starts it
 cinnamon-screensaver &
 
