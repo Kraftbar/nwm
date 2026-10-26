@@ -2038,7 +2038,7 @@ static void battery(char *buf, size_t size)
 		snprintf(buf, size, "%s%d%%", ac ? CHARGING : "", sum / n);
 }
 
-/* "2.7/3.4G": memory in use, what the kernel cannot hand out at once. */
+/* "2.7G": memory in use, what the kernel cannot hand out at once. */
 static void memory(char *buf, size_t size)
 {
 	char line[128];
@@ -2056,8 +2056,7 @@ static void memory(char *buf, size_t size)
 	}
 	fclose(f);
 	if (total)
-		snprintf(buf, size, "%.1f/%.1fG", (total - avail) / 1048576.0,
-			 total / 1048576.0);
+		snprintf(buf, size, "%.1fG", (total - avail) / 1048576.0);
 }
 
 static void drawonebar(int m)
