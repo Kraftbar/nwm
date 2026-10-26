@@ -16,8 +16,8 @@
  *   Super+right drag    resize from the nearest edge or corner
  *   bar                 a button per window (click focuses, or minimizes
  *                       the focused one), the root window name as status
- *                       text (xsetroot -name), tray icons, battery, a
- *                       clock and a power button; hidden until the pointer touches the
+ *                       text (xsetroot -name), tray icons, memory in use,
+ *                       battery, a clock and a power button; hidden until the pointer touches the
  *                       bottom edge
  *   Super, tapped       launcher, and again to close it: type, Enter starts
  *                       the top match, or runs what was typed when nothing
@@ -2038,11 +2038,33 @@ static void battery(char *buf, size_t size)
 		snprintf(buf, size, "%s%d%%", ac ? CHARGING : "", sum / n);
 }
 
+/* "2.7/3.4G": memory in use, what the kernel cannot hand out at once. */
+static void memory(char *buf, size_t size)
+{
+	char line[128];
+	long total = 0, avail = 0, v;
+	FILE *f;
+
+	buf[0] = '\0';
+	if (!(f = fopen("/proc/meminfo", "r")))
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		if (sscanf(line, "MemTotal: %ld", &v) == 1)
+			total = v;
+		else if (sscanf(line, "MemAvailable: %ld", &v) == 1)
+			avail = v;
+	}
+	fclose(f);
+	if (total)
+		snprintf(buf, size, "%.1f/%.1fG", (total - avail) / 1048576.0,
+			 total / 1048576.0);
+}
+
 static void drawonebar(int m)
 {
 	struct bar *b = &bars[m];
 	struct client *c, *list[MAXTAB], *t;
-	char status[512], line[512], clk[64], bat[32];
+	char status[512], line[512], clk[64], bat[32], mem[32];
 	int pad = 8, n = 0, i, j, x, w, right;
 	int base = (BARH + font->ascent - font->descent) / 2;
 	int bw = mons[m].w;
@@ -2066,6 +2088,11 @@ static void drawonebar(int m)
 	if (*bat) {
 		right -= BARGAP + textrun(NULL, NULL, 0, 0, bat, strlen(bat));
 		drawtext(b->draw, &xc_fg, right, base, bat);
+	}
+	memory(mem, sizeof(mem));
+	if (m == 0 && *mem) {
+		right -= BARGAP + textrun(NULL, NULL, 0, 0, mem, strlen(mem));
+		drawtext(b->draw, &xc_fg, right, base, mem);
 	}
 	right -= BARGAP - 4;
 	for (i = ntray - 1; m == 0 && i >= 0; i--) {
