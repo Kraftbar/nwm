@@ -59,3 +59,37 @@ Updating
 
 Not yet
 	display menu, workspaces.
+
+Around nwm (set up on tab, not part of the build)
+	Turned off for nwm only: ~/.config/autostart copies of mintreport,
+	mintupdate, Evolution-alarm-notify, remmina-applet and
+	xfce4-power-manager with "nwm;" added to NotShowIn. XFCE and
+	Cinnamon still start them. xfce4-power-manager would fight
+	csd-power over the lid.
+
+	Rotation: xrandr --output DSI-1 --rotate right in the autostart.
+	Cinnamon's Display settings stay empty under nwm, they talk to
+	muffin.
+
+	Touchpad: the autostart copies Cinnamon's natural-scroll and
+	tap-to-click onto every touchpad with xinput. A re-plugged
+	keyboard dock gets the defaults back until the next login.
+
+	blueman: org.blueman.general symbolic-status-icons true, plus the
+	Adwaita links under Tray icons above, for a white icon.
+
+	Notifications: xfce4-notifyd starts on D-Bus demand, nothing to do.
+
+	Firefox (profile 77jrvo59.default-release):
+	user.js	unloadOnLowMemory, unload after 5 min unseen, 64 MB
+		memory cache, no AV1 (the N4100 decodes VP9/H.264 in
+		hardware), userContent.css on. processCount and
+		max_total_viewers are back at defaults; trimming them
+		saved nothing.
+	chrome/userContent.css
+		YouTube: no comments, chat, end screen, Shorts, ambient
+		glow, hover previews or animations; recommendations stay.
+		X: no Premium box, Who to follow, Grok, communities, jobs
+		or animations; news and trends stay.
+	Neither saved much RAM; they cut CPU and clutter. Delete the two
+	files to undo.
