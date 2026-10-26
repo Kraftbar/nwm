@@ -85,7 +85,7 @@
 #define TERMINAL	"gnome-terminal --"	/* for Terminal=true apps */
 #define BARH		28	/* bottom bar on each monitor; 0 for none */
 #define BARBTN		220	/* widest a window button gets */
-#define BARGAP		8	/* between the things on the right */
+#define BARGAP		7	/* between the things on the right */
 #define AUTOHIDE	1	/* bar shows at the bottom edge; 0 keeps it up */
 #define HIDEDELAY	400	/* ms after the pointer leaves it */
 #define CLOCK		"%a %d %b  %H:%M"
@@ -93,6 +93,7 @@
 #define CHARGING	"\u26a1"	/* before the battery level, on AC */
 #define PSU		"/sys/class/power_supply"
 #define TRAYSZ		20	/* tray icon size, square */
+#define TRAYPAD		5	/* empty edge inside a tray icon */
 #define MAXTRAY		16
 
 #define SUPER		Mod4Mask
@@ -1513,14 +1514,19 @@ static XftFont *fontfor(FcChar32 u)
  * Measure n bytes of s, drawing them too when d is set, a run of
  * characters at a time that the same font has. Returns the width.
  */
-static int textrun(XftDraw *d, XftColor *col, int x, int y, const char *s,
-		   size_t n)
+static int inkrun(XftDraw *d, XftColor *col, int x, int y, const char *s,
+		  size_t n, int *inkl, int *inkr)
 {
 	XftFont *f, *rf;
 	XGlyphInfo g;
 	FcChar32 u;
 	size_t i = 0, start;
 	int len, w = 0;
+
+	if (inkl)
+		*inkl = INT_MAX;
+	if (inkr)
+		*inkr = 0;
 
 	while (i < n) {
 		start = i;
@@ -1541,9 +1547,36 @@ static int textrun(XftDraw *d, XftColor *col, int x, int y, const char *s,
 		if (d)
 			XftDrawStringUtf8(d, col, rf, x + w, y,
 					  (FcChar8 *)s + start, i - start);
+		/* the ink box: g.x is how far the origin sits into it */
+		if (inkl && g.width)
+			*inkl = min(*inkl, w - g.x);
+		if (inkr && g.width)
+			*inkr = max(*inkr, w - g.x + g.width);
 		w += g.xOff;
 	}
+	if (inkl && *inkl == INT_MAX)
+		*inkl = 0;
 	return w;
+}
+
+static int textrun(XftDraw *d, XftColor *col, int x, int y, const char *s,
+		   size_t n)
+{
+	return inkrun(d, col, x, y, s, n, NULL, NULL);
+}
+
+/*
+ * Draw s so its ink, not its advance, ends at right, and return where the
+ * ink starts. Spacing by ink keeps gaps even whatever the glyphs carry
+ * as side bearing: a 7 at the end of the clock, the power symbol.
+ */
+static int drawright(XftDraw *d, int right, int y, const char *s)
+{
+	int l, r;
+
+	inkrun(NULL, NULL, 0, 0, s, strlen(s), &l, &r);
+	inkrun(d, &xc_fg, right - r, y, s, strlen(s), NULL, NULL);
+	return right - r + l;
 }
 
 static void drawtext(XftDraw *d, XftColor *col, int x, int y, const char *s)
@@ -2072,50 +2105,40 @@ static void drawonebar(int m)
 	XftDrawRect(b->draw, &xc_bg, 0, 0, bw, BARH);
 
 	/*
-	 * right to left, BARGAP apart: power button, clock, battery, then on
-	 * the first bar tray icons and status. Icons are drawn smaller than
-	 * their window, so they sit a little closer.
+	 * right to left, BARGAP of empty bar between the ink of each: power
+	 * button, clock, memory, battery, then on the first bar tray icons
+	 * and status. Icons get a little more, since a thin glyph with the
+	 * same gap looks closer than text does.
 	 */
-	right = bw - BARGAP - textrun(NULL, NULL, 0, 0, POWER, strlen(POWER));
-	drawtext(b->draw, &xc_fg, right, base, POWER);
-	b->powerx = right - BARGAP / 2;
+	right = drawright(b->draw, bw - BARGAP, base, POWER) - BARGAP;
+	b->powerx = right + BARGAP / 2;
 	strftime(clk, sizeof(clk), CLOCK, localtime(&now));
-	/* the power glyph carries its own space on the left */
-	right -= BARGAP - 3 + textrun(NULL, NULL, 0, 0, clk, strlen(clk));
-	drawtext(b->draw, &xc_fg, right, base, clk);
+	right = drawright(b->draw, right, base, clk) - BARGAP;
 	battery(bat, sizeof(bat));
-	if (*bat) {
-		right -= BARGAP + textrun(NULL, NULL, 0, 0, bat, strlen(bat));
-		drawtext(b->draw, &xc_fg, right, base, bat);
-	}
+	if (*bat)
+		right = drawright(b->draw, right, base, bat) - BARGAP;
 	memory(mem, sizeof(mem));
-	if (m == 0 && *mem) {
-		right -= BARGAP + textrun(NULL, NULL, 0, 0, mem, strlen(mem));
-		drawtext(b->draw, &xc_fg, right, base, mem);
-	}
-	right -= BARGAP - 4;
+	if (m == 0 && *mem)
+		right = drawright(b->draw, right, base, mem) - BARGAP;
 	for (i = ntray - 1; m == 0 && i >= 0; i--) {
 		if (!tray[i].mapped)
 			continue;
-		right -= TRAYSZ;
+		/* icons fill their window but for about TRAYPAD on each side */
+		right -= TRAYSZ - TRAYPAD + 2;
 		if (tray[i].x != right) {
 			tray[i].x = right;
 			XMoveResizeWindow(dpy, tray[i].win, right,
 					  (BARH - TRAYSZ) / 2, TRAYSZ, TRAYSZ);
 		}
-		right -= BARGAP / 2 - 4;
+		right += TRAYPAD - BARGAP - 2;
 	}
-	right -= 4;
 	if (m == 0) {
 		gettitle(root, status, sizeof(status));
 		if (*status) {
 			fittext(status, bw / 3);
-			right -= BARGAP + textrun(NULL, NULL, 0, 0, status,
-						  strlen(status));
-			drawtext(b->draw, &xc_fg, right, base, status);
+			right = drawright(b->draw, right, base, status) - BARGAP;
 		}
 	}
-	right -= BARGAP;
 
 	/*
 	 * left: a button per window on this monitor, in the order they
