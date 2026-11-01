@@ -7,7 +7,8 @@ Xlib + Xinerama + Xft, so it runs on any distro with Xorg.
 Keys
 	Super+arrows		snap ladder: halves, quarters, max, min
 	Super+Shift+Left/Right	move window to the next monitor
-	Alt+Tab, Alt+Shift+Tab	switcher with thumbnails; Q closes the highlighted one
+	Alt+Tab, Alt+Shift+Tab	switcher with thumbnails; Left/Right move,
+				Q closes the highlighted one
 	Ctrl+Shift+W		close (terminals keep it for their tabs)
 	Alt+F4, Super+Q		close
 	Super+drag		move; drop on top = max, side = half, corner = quarter
@@ -19,18 +20,22 @@ Keys
 				Also lock, log out, suspend, restart, shut down.
 	window edges		drag just outside the focused window to resize
 	Ctrl+Alt+T		gnome-terminal
+	Super+E			nemo
 	Super+Shift+T/A/V/S	ocrclip, askclaude, voicetoggle, screenshot
 	Super+L, Ctrl+Alt+L	lock (cinnamon-screensaver)
+	Fn keys			volume, mute, mic mute, brightness; a box shows the level
 	Ctrl+Alt+Delete		quit
 
 Bar
 	Bottom of each monitor, hidden until the pointer touches the bottom
 	edge (AUTOHIDE in nwm.c). A button per window on that monitor (click
-	focuses, click the focused one minimizes), memory in use, battery level
+	focuses, click the focused one minimizes), memory and swap in use (swap
+	only when there is some configured), battery level
 	(⚡ on AC), a
 	clock and a power button
 	(lock, log out, suspend, restart, shut down). The first one
-	also has status text and tray icons. The status text is the root
+	also has status text, tray icons and a sound button (Cinnamon's sound
+	settings). The status text is the root
 	window name, set with xsetroot -name.
 
 No title bars; apps with their own (Chrome, GTK) drag as usual.
@@ -60,6 +65,11 @@ Updating
 Not yet
 	display menu, workspaces.
 
+Could have
+	Night light in nwm, through XRandR gamma like xsct: no xsct or
+	shell loop, a fade, back on after a screen is plugged or rotated,
+	a key to toggle it.
+
 Around nwm (set up on tab, not part of the build)
 	Turned off for nwm only: ~/.config/autostart copies of mintreport,
 	mintupdate, Evolution-alarm-notify, remmina-applet and
@@ -72,8 +82,11 @@ Around nwm (set up on tab, not part of the build)
 	muffin.
 
 	Touchpad: the autostart copies Cinnamon's natural-scroll and
-	tap-to-click onto every touchpad with xinput. A re-plugged
-	keyboard dock gets the defaults back until the next login.
+	tap-to-click onto every touchpad with xinput, and again within 3 s
+	whenever the keyboard dock reconnects with the defaults.
+
+	Night light: Cinnamon's does nothing under nwm, so the autostart
+	runs xsct 1000 in the hours set for it there (now 20-11).
 
 	blueman: org.blueman.general symbolic-status-icons true, plus the
 	Adwaita links under Tray icons above, for a white icon.

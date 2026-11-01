@@ -4,17 +4,46 @@
 # blueman...), which it starts by itself.
 
 # Touchpad as set in Cinnamon's settings: Cinnamon applies these itself,
-# so under nwm nothing else would.
+# so under nwm nothing else would. The keyboard dock reconnects now and
+# then, back on the defaults and often with the same id, so the settings
+# themselves are checked and put back.
 tp=org.cinnamon.desktop.peripherals.touchpad
-ns=$([ "$(gsettings get $tp natural-scroll)" = true ] && echo 1 || echo 0)
-tap=$([ "$(gsettings get $tp tap-to-click)" = true ] && echo 1 || echo 0)
-xinput list --name-only | grep -i touchpad | while read -r dev; do
-	xinput set-prop "$dev" "libinput Natural Scrolling Enabled" $ns
-	xinput set-prop "$dev" "libinput Tapping Enabled" $tap
-done
+while :; do
+	ns=$([ "$(gsettings get $tp natural-scroll)" = true ] && echo 1 || echo 0)
+	tap=$([ "$(gsettings get $tp tap-to-click)" = true ] && echo 1 || echo 0)
+	for id in $(xinput list --short | grep -i touchpad |
+		    sed 's/.*id=\([0-9]*\).*/\1/'); do
+		props=$(xinput list-props $id)
+		echo "$props" | grep -q "Natural Scrolling Enabled ([0-9]*):[[:space:]]*$ns$" ||
+			xinput set-prop $id "libinput Natural Scrolling Enabled" $ns
+		echo "$props" | grep -q "Tapping Enabled ([0-9]*):[[:space:]]*$tap$" ||
+			xinput set-prop $id "libinput Tapping Enabled" $tap
+	done
+	sleep 3
+done &
 
 # Locker for Super+L and Ctrl+Alt+L; cinnamon-session normally starts it
 cinnamon-screensaver &
+
+# Night light in the hours Cinnamon's is set to, which under nwm does
+# nothing. Only changes are applied, so xsct by hand holds until the next.
+night=1000
+nl=org.cinnamon.settings-daemon.plugins.color
+was=
+while :; do
+	from=$(gsettings get $nl night-light-schedule-from)
+	to=$(gsettings get $nl night-light-schedule-to)
+	now=$(date +%H:%M)
+	is=$(echo "$now $from $to" | LC_ALL=C awk '{
+		split($1, t, ":"); h = t[1] + t[2] / 60; f = $2 + 0; e = $3 + 0
+		on = f <= e ? (h >= f && h < e) : (h >= f || h < e)
+		print on ? "on" : "off" }')
+	if [ "$is" != "$was" ]; then
+		[ "$is" = on ] && xsct $night || xsct 0
+		was=$is
+	fi
+	sleep 60
+done &
 
 # Bar status text: what the claude-usage and oslo-weather applets showed.
 while :; do

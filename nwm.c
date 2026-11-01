@@ -6,7 +6,8 @@
  *   Super+arrows        the windows-snap ladder: halves, quarters, max, min
  *   Super+Shift+Left/Right  move the window to the next monitor
  *   Alt+Tab             MRU switcher with small live thumbnails, shows at
- *                       once, Q closes the highlighted window, Esc cancels
+ *                       once, Left/Right move along it too, Q closes the
+ *                       highlighted window, Esc cancels
  *   Ctrl+Shift+W        close, except in terminals, which keep it for tabs
  *   Alt+F4, Super+Q     close
  *   Super+drag          move; dropped on the top edge maximizes, on a side
@@ -16,8 +17,9 @@
  *   Super+right drag    resize from the nearest edge or corner
  *   bar                 a button per window (click focuses, or minimizes
  *                       the focused one), the root window name as status
- *                       text (xsetroot -name), tray icons, memory in use,
- *                       battery, a clock and a power button; hidden until the pointer touches the
+ *                       text (xsetroot -name), tray icons, memory and swap
+ *                       in use,
+ *                       battery, a clock, a sound and a power button; hidden until the pointer touches the
  *                       bottom edge
  *   Super, tapped       launcher, and again to close it: type, Enter starts
  *                       the top match, or runs what was typed when nothing
@@ -53,6 +55,7 @@
 #include <X11/XKBlib.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
+#include <X11/XF86keysym.h>
 #include <X11/extensions/Xcomposite.h>
 #include <X11/extensions/Xinerama.h>
 #include <X11/extensions/Xrender.h>
@@ -88,8 +91,15 @@
 #define BARGAP		7	/* between the things on the right */
 #define AUTOHIDE	1	/* bar shows at the bottom edge; 0 keeps it up */
 #define HIDEDELAY	400	/* ms after the pointer leaves it */
+#define OSDTIME		600	/* ms the volume or brightness box stays up */
+#define OSDW		300
+#define OSDH		56
 #define CLOCK		"%a %d %b  %H:%M"
 #define POWER		"\u23fb"	/* the bar's power button */
+#define SOUND		"\U0001f56a"	/* opens SOUNDCMD */
+#define MUTEDICON	"\U0001f568"	/* speaker without waves */
+#define LIGHTICON	"\u2600"
+#define SOUNDCMD	"cinnamon-settings sound"
 #define CHARGING	"\u26a1"	/* before the battery level, on AC */
 #define PSU		"/sys/class/power_supply"
 #define TRAYSZ		20	/* tray icon size, square */
@@ -107,8 +117,26 @@
 #define ESS		"$HOME/github/linux-essentials"
 /* Cinnamon's locker; its daemon is started from the autostart file */
 #define LOCK		"cinnamon-screensaver-command -l"
+/* Fn keys, which Cinnamon grabs for csd-media-keys */
+#define VOL		"wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ "
+#define MUTE		"wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+#define MICMUTE		"wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"
+/* brightness through logind, the backlight file being root's; never off */
+#define LIGHT(d)	"b=$(brightnessctl g) m=$(brightnessctl m); " \
+			"b=$((b " d " m / 20)); [ $b -lt $((m / 20)) ] && " \
+			"b=$((m / 20)); [ $b -gt $m ] && b=$m; busctl call " \
+			"org.freedesktop.login1 /org/freedesktop/login1/" \
+			"session/auto org.freedesktop.login1.Session " \
+			"SetBrightness ssu backlight " \
+			"$(basename /sys/class/backlight/*) $b >/dev/null; " \
+			"echo $((b * 100 / m))"
+/* after VOL or MUTE: the level for the box, " m" after it while muted */
+#define GETVOL		"; wpctl get-volume @DEFAULT_AUDIO_SINK@ | LC_ALL=C awk " \
+			"'{ printf \"%d%s\\n\", $2 * 100 + 0.5, " \
+			"/MUTED/ ? \" m\" : \"\" }'"
 
-enum { K_SNAP, K_MOVEMON, K_CLOSE, K_TAB, K_SPAWN, K_QUIT };
+enum { K_SNAP, K_MOVEMON, K_CLOSE, K_TAB, K_SPAWN, K_OSD, K_QUIT };
+enum { O_SOUND, O_LIGHT };	/* what K_OSD shows the level of */
 enum { D_LEFT, D_RIGHT, D_UP, D_DOWN };
 
 struct key {
@@ -131,12 +159,19 @@ static const struct key keys[] = {
 	{ ALT,			XK_Tab,		K_TAB,		+1 },
 	{ ALT | ShiftMask,	XK_Tab,		K_TAB,		-1 },
 	{ ControlMask | ALT,	XK_t,		K_SPAWN, 0, "gnome-terminal" },
+	{ SUPER,		XK_e,		K_SPAWN, 0, "nemo" },
 	{ SUPER | ShiftMask,	XK_t,		K_SPAWN, 0, ESS "/ocr/ocrclip" },
 	{ SUPER | ShiftMask,	XK_a,		K_SPAWN, 0, ESS "/ai/askclaude" },
 	{ SUPER | ShiftMask,	XK_v,		K_SPAWN, 0, ESS "/voice/voicetoggle" },
 	{ SUPER | ShiftMask,	XK_s,		K_SPAWN, 0, "gnome-screenshot -a -c" },
 	{ SUPER,		XK_l,		K_SPAWN, 0, LOCK },
 	{ ControlMask | ALT,	XK_l,		K_SPAWN, 0, LOCK },
+	{ 0,	XF86XK_AudioRaiseVolume,	K_OSD, O_SOUND, VOL "5%+" GETVOL },
+	{ 0,	XF86XK_AudioLowerVolume,	K_OSD, O_SOUND, VOL "5%-" GETVOL },
+	{ 0,	XF86XK_AudioMute,		K_OSD, O_SOUND, MUTE GETVOL },
+	{ 0,	XF86XK_AudioMicMute,		K_SPAWN, 0, MICMUTE },
+	{ 0,	XF86XK_MonBrightnessUp,		K_OSD, O_LIGHT, LIGHT("+") },
+	{ 0,	XF86XK_MonBrightnessDown,	K_OSD, O_LIGHT, LIGHT("-") },
 	{ ControlMask | ALT,	XK_Delete,	K_QUIT },
 };
 
@@ -247,7 +282,7 @@ struct dock {
 };
 
 static Display *dpy;
-static Window root, checkwin, tabwin;
+static Window root, checkwin, tabwin, osdwin;
 static int scr, sw, sh, otherwm;
 static volatile sig_atomic_t running = 1, restarting;
 static Atom atom[NATOMS];
@@ -278,6 +313,7 @@ static struct bar {
 	} btn[MAXTAB];
 	int nbtn;
 	int powerx;		/* where the power button starts */
+	int soundx, soundend;	/* the sound button, on the first bar */
 } bars[MAXMONS];
 static int nbars, bardirty;
 static long long hideat;	/* ms, monotonic; 0 when no hide is due */
@@ -304,6 +340,13 @@ static int nfallback;
 static FcChar32 nofont[32];	/* codepoints no font has, to stop looking */
 static int nnofont;
 static XftDraw *tabdraw;
+
+/* Volume and brightness box: the level comes back from a K_OSD command */
+static XftDraw *osddraw;
+static int osdfd = -1, osdwhat;
+static char osdbuf[64];
+static size_t osdlen;
+static long long osdhideat;	/* ms, monotonic; 0 when it is not up */
 static XftColor xc_bg, xc_sel, xc_fg, xc_dim, xc_box;
 static int composite;		/* Composite and Render are there */
 static Picture tabpic;
@@ -329,6 +372,7 @@ static size_t qlen;
 static void handle(XEvent *ev);
 static void focus(struct client *c);
 static void drawtab(void);
+static void osdrun(const char *cmd, int what);
 static void endtab(struct client *c);
 static void placegrips(void);
 static int updatethumb(struct client *c);
@@ -568,7 +612,7 @@ static struct client *find(Window w)
 	return NULL;
 }
 
-static int sendproto(struct client *c, Atom proto)
+static int sendproto(struct client *c, Atom proto, Time t)
 {
 	XEvent ev = { 0 };
 	Atom *p;
@@ -586,7 +630,7 @@ static int sendproto(struct client *c, Atom proto)
 	ev.xclient.message_type = atom[WM_PROTOCOLS];
 	ev.xclient.format = 32;
 	ev.xclient.data.l[0] = proto;
-	ev.xclient.data.l[1] = CurrentTime;
+	ev.xclient.data.l[1] = t;
 	XSendEvent(dpy, c->win, False, NoEventMask, &ev);
 	return 1;
 }
@@ -594,7 +638,7 @@ static int sendproto(struct client *c, Atom proto)
 /* The polite close, same as clicking the X: the app may still ask first. */
 static void closewin(struct client *c)
 {
-	if (!sendproto(c, atom[WM_DELETE_WINDOW]))
+	if (!sendproto(c, atom[WM_DELETE_WINDOW], CurrentTime))
 		XKillClient(dpy, c->win);
 }
 
@@ -969,8 +1013,28 @@ static void grabkeys(void)
 	updateclosegrab();
 }
 
+/*
+ * The server's time now, from a property change on checkwin. Focus set at
+ * CurrentTime always wins, so a busy app that gets to an old WM_TAKE_FOCUS
+ * late would take the keyboard back from the window focused since; with
+ * real times the server drops its stale request.
+ */
+static Time servertime(void)
+{
+	XEvent ev;
+
+	if (!checkwin)
+		return CurrentTime;
+	XChangeProperty(dpy, checkwin, atom[NET_WM_NAME], atom[UTF8_STRING], 8,
+			PropModeAppend, NULL, 0);
+	XWindowEvent(dpy, checkwin, PropertyChangeMask, &ev);
+	return ev.xproperty.time;
+}
+
 static void focus(struct client *c)
 {
+	Time t;
+
 	struct client **pp;
 
 	if (!c)
@@ -1005,20 +1069,33 @@ static void focus(struct client *c)
 	XSetWindowBorder(dpy, c->win, pix_focus);
 	grabbuttons(c, 1);
 	restack(c);
+	t = servertime();
 	if (!c->noinput)
-		XSetInputFocus(dpy, c->win, RevertToPointerRoot, CurrentTime);
-	sendproto(c, atom[WM_TAKE_FOCUS]);
+		XSetInputFocus(dpy, c->win, RevertToPointerRoot, t);
+	sendproto(c, atom[WM_TAKE_FOCUS], t);
 	XChangeProperty(dpy, root, atom[NET_ACTIVE_WINDOW], XA_WINDOW, 32,
 			PropModeReplace, (unsigned char *)&c->win, 1);
 	updateclosegrab();
 	bardirty = 1;
 }
 
+/* Re-read the input hint; a selected window that turns it on gets the keys. */
+static void updatenoinput(struct client *c)
+{
+	XWMHints *wmh = XGetWMHints(dpy, c->win);
+	int was = c->noinput;
+
+	c->noinput = wmh && (wmh->flags & InputHint) && !wmh->input;
+	if (wmh)
+		XFree(wmh);
+	if (c == sel && was && !c->noinput)
+		XSetInputFocus(dpy, c->win, RevertToPointerRoot, servertime());
+}
+
 static void manage(Window w, XWindowAttributes *wa)
 {
 	struct client *c = calloc(1, sizeof(*c)), *t;
 	XSizeHints hints;
-	XWMHints *wmh;
 	struct rect a;
 	long supplied, ext[4];
 	int m;
@@ -1039,10 +1116,7 @@ static void manage(Window w, XWindowAttributes *wa)
 	c->fixed = (hints.flags & PMinSize) && (hints.flags & PMaxSize) &&
 		   hints.min_width == hints.max_width &&
 		   hints.min_height == hints.max_height;
-	if ((wmh = XGetWMHints(dpy, w))) {
-		c->noinput = (wmh->flags & InputHint) && !wmh->input;
-		XFree(wmh);
-	}
+	updatenoinput(c);
 
 	/*
 	 * Dialogs centre over their parent. Anything that did not ask for a
@@ -1876,6 +1950,9 @@ static void tabkey(KeySym sym, unsigned int state)
 	if (sym == XK_Tab) {
 		tabsel = (tabsel + (state & ShiftMask ? -1 : 1) + ntab) % ntab;
 		drawtab();
+	} else if (sym == XK_Right || sym == XK_Left) {
+		tabsel = (tabsel + (sym == XK_Right ? 1 : -1) + ntab) % ntab;
+		drawtab();
 	} else if (sym == XK_q) {
 		/* the list drops it once it is really gone (alttab-close@nybo) */
 		closewin(tab[tabsel]);
@@ -2071,32 +2148,51 @@ static void battery(char *buf, size_t size)
 		snprintf(buf, size, "%s%d%%", ac ? CHARGING : "", sum / n);
 }
 
-/* "2.7G": memory in use, what the kernel cannot hand out at once. */
-static void memory(char *buf, size_t size)
+/*
+ * "2.7G": memory in use, what the kernel cannot hand out at once,
+ * "0.4G": disk swap in use and "0.2G": what zram holds, uncompressed;
+ * each left empty when there is none of that kind.
+ */
+static void memory(char *mem, char *swap, char *zram, size_t n)
 {
-	char line[128];
-	long total = 0, avail = 0, v;
+	char line[256], name[128], type[32];
+	long total = 0, avail = 0, v, sz, used, disk = 0, z = 0;
+	int hasdisk = 0, hasz = 0;
 	FILE *f;
 
-	buf[0] = '\0';
-	if (!(f = fopen("/proc/meminfo", "r")))
-		return;
-	while (fgets(line, sizeof(line), f)) {
-		if (sscanf(line, "MemTotal: %ld", &v) == 1)
-			total = v;
-		else if (sscanf(line, "MemAvailable: %ld", &v) == 1)
-			avail = v;
+	mem[0] = swap[0] = zram[0] = '\0';
+	if ((f = fopen("/proc/meminfo", "r"))) {
+		while (fgets(line, sizeof(line), f)) {
+			if (sscanf(line, "MemTotal: %ld", &v) == 1)
+				total = v;
+			else if (sscanf(line, "MemAvailable: %ld", &v) == 1)
+				avail = v;
+		}
+		fclose(f);
 	}
-	fclose(f);
 	if (total)
-		snprintf(buf, size, "%.1fG", (total - avail) / 1048576.0);
+		snprintf(mem, n, "%.1fG", (total - avail) / 1048576.0);
+	if (!(f = fopen("/proc/swaps", "r")))
+		return;
+	while (fgets(line, sizeof(line), f))
+		if (sscanf(line, "%127s %31s %ld %ld", name, type, &sz, &used) == 4) {
+			if (!strncmp(name, "/dev/zram", 9))
+				z += used, hasz = 1;
+			else
+				disk += used, hasdisk = 1;
+		}
+	fclose(f);
+	if (hasdisk)
+		snprintf(swap, n, "%.1fG", disk / 1048576.0);
+	if (hasz)
+		snprintf(zram, n, "%.1fG", z / 1048576.0);
 }
 
 static void drawonebar(int m)
 {
 	struct bar *b = &bars[m];
 	struct client *c, *list[MAXTAB], *t;
-	char status[512], line[512], clk[64], bat[32], mem[32];
+	char status[512], line[512], clk[64], bat[32], mem[32], swap[32], zram[32];
 	int pad = 8, n = 0, i, j, x, w, right;
 	int base = (BARH + font->ascent - font->descent) / 2;
 	int bw = mons[m].w;
@@ -2106,7 +2202,7 @@ static void drawonebar(int m)
 
 	/*
 	 * right to left, BARGAP of empty bar between the ink of each: power
-	 * button, clock, memory, battery, then on the first bar tray icons
+	 * button, clock, battery, memory, swap, zram, then on the first bar sound, tray icons
 	 * and status. Icons get a little more, since a thin glyph with the
 	 * same gap looks closer than text does.
 	 */
@@ -2117,9 +2213,20 @@ static void drawonebar(int m)
 	battery(bat, sizeof(bat));
 	if (*bat)
 		right = drawright(b->draw, right, base, bat) - BARGAP;
-	memory(mem, sizeof(mem));
+	memory(mem, swap, zram, sizeof(mem));
 	if (m == 0 && *mem)
 		right = drawright(b->draw, right, base, mem) - BARGAP;
+	if (m == 0 && *swap)
+		right = drawright(b->draw, right, base, swap) - BARGAP;
+	if (m == 0 && *zram)
+		right = drawright(b->draw, right, base, zram) - BARGAP;
+	/* the sound button sits with the tray icons, which it stands in for */
+	b->soundx = b->soundend = 0;
+	if (m == 0) {
+		b->soundend = right + BARGAP / 2;
+		right = drawright(b->draw, right, base, SOUND) - BARGAP;
+		b->soundx = right + BARGAP / 2;
+	}
 	for (i = ntray - 1; m == 0 && i >= 0; i--) {
 		if (!tray[i].mapped)
 			continue;
@@ -2180,7 +2287,7 @@ static void drawbar(void)
 
 /*
  * Click a window to bring it up, or the focused one to minimize it; the
- * power button opens the session entries.
+ * power button opens the session entries, the sound one the sound settings.
  */
 static void barclick(struct bar *b, int x)
 {
@@ -2189,6 +2296,10 @@ static void barclick(struct bar *b, int x)
 
 	if (x >= b->powerx) {
 		launchstart(1);
+		return;
+	}
+	if (x >= b->soundx && x < b->soundend) {
+		spawn(SOUNDCMD);
 		return;
 	}
 	for (i = 0; i < b->nbtn; i++) {
@@ -2831,6 +2942,9 @@ static void keypress(XEvent *e)
 		case K_SPAWN:
 			spawn(k->cmd);
 			break;
+		case K_OSD:
+			osdrun(k->cmd, k->arg);
+			break;
 		case K_QUIT:
 			running = 0;
 			break;
@@ -2871,6 +2985,7 @@ static void maprequest(XEvent *e)
 static void propertynotify(XEvent *e)
 {
 	XPropertyEvent *ev = &e->xproperty;
+	struct client *c;
 	struct dock *d;
 	int on;
 
@@ -2887,7 +3002,12 @@ static void propertynotify(XEvent *e)
 			XMapRaised(dpy, ev->window);
 		else
 			XUnmapWindow(dpy, ev->window);
-	} else if (find(ev->window)) {
+	} else if ((c = find(ev->window))) {
+		/* apps may flip the input hint after mapping */
+		if (ev->atom == XA_WM_HINTS) {
+			updatenoinput(c);
+			return;
+		}
 		if (ev->atom != XA_WM_NAME && ev->atom != atom[NET_WM_NAME])
 			return;
 		bardirty = 1;
@@ -3149,6 +3269,13 @@ static void setup(void)
 			       &wa);
 	tabdraw = XftDrawCreate(dpy, tabwin, DefaultVisual(dpy, scr),
 				DefaultColormap(dpy, scr));
+	wa.event_mask = 0;
+	osdwin = XCreateWindow(dpy, root, 0, 0, 1, 1, 0, CopyFromParent,
+			       InputOutput, CopyFromParent,
+			       CWOverrideRedirect | CWBackPixel | CWEventMask,
+			       &wa);
+	osddraw = XftDrawCreate(dpy, osdwin, DefaultVisual(dpy, scr),
+				DefaultColormap(dpy, scr));
 	initcomposite();
 	placebars();
 	if (nbars)
@@ -3156,6 +3283,7 @@ static void setup(void)
 
 	/* EWMH: who we are and what we support */
 	checkwin = XCreateSimpleWindow(dpy, root, 0, 0, 1, 1, 0, 0, 0);
+	XSelectInput(dpy, checkwin, PropertyChangeMask);
 	XChangeProperty(dpy, checkwin, atom[NET_SUPPORTING_WM_CHECK],
 			XA_WINDOW, 32, PropModeReplace,
 			(unsigned char *)&checkwin, 1);
@@ -3234,6 +3362,75 @@ static void quit(int sig)
 }
 
 /*
+ * Run cmd like spawn(), but keep its output: the level it prints shows in
+ * the box once it is done. A newer key press wins over one still running.
+ */
+static void osdrun(const char *cmd, int what)
+{
+	struct sigaction sa = { .sa_handler = SIG_DFL };
+	int fd[2];
+
+	if (osdfd >= 0)
+		close(osdfd);
+	osdfd = -1;
+	if (pipe(fd) < 0)
+		return;
+	if (fork() == 0) {
+		close(ConnectionNumber(dpy));
+		close(fd[0]);
+		dup2(fd[1], STDOUT_FILENO);
+		setsid();
+		sigemptyset(&sa.sa_mask);
+		sigaction(SIGCHLD, &sa, NULL);
+		execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+		_exit(127);
+	}
+	close(fd[1]);
+	osdfd = fd[0];
+	osdlen = 0;
+	osdwhat = what;
+}
+
+/* An icon, a bar to 100% and the number, low on the focused monitor. */
+static void drawosd(int level, int muted)
+{
+	struct rect r = mons[sel ? clientmon(sel) : pointermon()];
+	int pad = 16, base = (OSDH + font->ascent - font->descent) / 2;
+	int bx = pad + 40, bw = OSDW - bx - pad - 56, bh = 6;
+	char num[16];
+
+	XMoveResizeWindow(dpy, osdwin, r.x + (r.w - OSDW) / 2,
+			  r.y + r.h - OSDH - 4 * BARH, OSDW, OSDH);
+	XMapRaised(dpy, osdwin);
+	XftDrawRect(osddraw, &xc_bg, 0, 0, OSDW, OSDH);
+	drawtext(osddraw, &xc_fg, pad, base, osdwhat == O_LIGHT ? LIGHTICON :
+		 muted ? MUTEDICON : SOUND);
+	XftDrawRect(osddraw, &xc_box, bx, (OSDH - bh) / 2, bw, bh);
+	XftDrawRect(osddraw, muted ? &xc_dim : &xc_sel, bx, (OSDH - bh) / 2,
+		    bw * min(max(level, 0), 100) / 100, bh);
+	snprintf(num, sizeof(num), "%d%%", level);
+	drawright(osddraw, OSDW - pad, base, num);
+	osdhideat = nowms() + OSDTIME;
+}
+
+/* Take what the command printed; at its end, show the box. */
+static void osdread(void)
+{
+	ssize_t n = read(osdfd, osdbuf + osdlen, sizeof(osdbuf) - 1 - osdlen);
+
+	if (n > 0) {
+		osdlen += n;
+		if (osdlen < sizeof(osdbuf) - 1)
+			return;
+	}
+	close(osdfd);
+	osdfd = -1;
+	osdbuf[osdlen] = '\0';
+	if (osdlen && osdbuf[0] >= '0' && osdbuf[0] <= '9')
+		drawosd(atoi(osdbuf), strstr(osdbuf, " m") != NULL);
+}
+
+/*
  * Wait for X, for the clock to need redrawing, or for a bar to be due to
  * hide. 0 when it was a timer.
  */
@@ -3246,13 +3443,26 @@ static int waitevent(void)
 
 	if (hideat)
 		ms = max(min(ms, hideat - nowms()), 0);
+	if (osdhideat)
+		ms = max(min(ms, osdhideat - nowms()), 0);
 	tv.tv_sec = ms / 1000;
 	tv.tv_usec = ms % 1000 * 1000;
 	FD_ZERO(&fds);
 	FD_SET(fd, &fds);
+	if (osdfd >= 0)
+		FD_SET(osdfd, &fds);
 	XFlush(dpy);
-	if (select(fd + 1, &fds, NULL, NULL, &tv) > 0)
-		return 1;
+	if (select(max(fd, osdfd) + 1, &fds, NULL, NULL, &tv) > 0) {
+		if (osdfd >= 0 && FD_ISSET(osdfd, &fds))
+			osdread();
+		if (FD_ISSET(fd, &fds))
+			return 1;
+		return 0;
+	}
+	if (osdhideat && nowms() >= osdhideat) {
+		osdhideat = 0;
+		XUnmapWindow(dpy, osdwin);
+	}
 	if (hideat && nowms() >= hideat) {
 		hideat = 0;
 		autohide();
