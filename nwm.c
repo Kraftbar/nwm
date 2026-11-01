@@ -265,6 +265,7 @@ struct client {
 	int x, y, w, h;		/* outer geometry, border included */
 	int bw;
 	struct rect fl;		/* where the window floats back to */
+	struct rect home;	/* fl when the screen was homew x homeh */
 	int state;
 	int minimized, fullscreen, fixed, noinput;
 	int ignoreunmap;	/* unmaps we did ourselves, to minimize */
@@ -292,6 +293,8 @@ static Window grips[8];		/* indexed by SZ_ direction */
 static unsigned int numlockmask;
 static struct rect mons[MAXMONS];
 static int nmons;
+static int homew, homeh;	/* screen size floating windows go back to */
+static int scanning;		/* adopting the windows already up */
 static struct dock docks[MAXDOCKS];
 static int ndocks;
 /* notifications and the like: mapped as asked, kept on top, not managed */
@@ -764,6 +767,30 @@ static void arrange(struct client *c, int m)
 }
 
 /*
+ * The screen changed size (rotated, or a phone's remote session taking it
+ * over): floating windows are about to be pulled inside it, so where they
+ * were is kept, and given back when the screen is that size again.
+ */
+static void keephome(int ow, int oh)
+{
+	struct client *c;
+
+	if (sw == ow && sh == oh)
+		return;
+	if (homew && sw == homew && sh == homeh) {
+		for (c = clients; c; c = c->next)
+			if (c->home.w)
+				c->fl = c->home;
+		homew = homeh = 0;
+	} else if (!homew) {
+		for (c = clients; c; c = c->next)
+			c->home = c->fl;
+		homew = ow;
+		homeh = oh;
+	}
+}
+
+/*
  * Monitors or docks changed: zones follow, and floating windows are pulled
  * back inside the work area, since a rotated or unplugged screen can leave
  * them half off it.
@@ -1120,9 +1147,12 @@ static void manage(Window w, XWindowAttributes *wa)
 
 	/*
 	 * Dialogs centre over their parent. Anything that did not ask for a
-	 * position centres on the monitor the pointer is on.
+	 * position centres on the monitor the pointer is on, unless it was
+	 * already up (a restart): it stays where it is.
 	 */
-	if ((t = find(c->transfor))) {
+	if (scanning) {
+		m = clientmon(c);
+	} else if ((t = find(c->transfor))) {
 		c->x = t->x + (t->w - c->w) / 2;
 		c->y = t->y + (t->h - c->h) / 2;
 		m = clientmon(t);
@@ -3057,7 +3087,10 @@ static void handle(XEvent *ev)
 	case ConfigureNotify:
 		/* the screen itself changed: monitors added, moved, resized */
 		if (ev->xconfigure.window == root) {
+			int ow = sw, oh = sh;
+
 			updatemons();
+			keephome(ow, oh);
 			placebars();
 			relayout();
 		} else if (findtray(ev->xconfigure.window) >= 0 &&
@@ -3214,12 +3247,14 @@ static void scan(void)
 
 	if (!XQueryTree(dpy, root, &d1, &d2, &wins, &n))
 		return;
+	scanning = 1;
 	for (i = 0; i < n; i++) {
 		if (!XGetWindowAttributes(dpy, wins[i], &wa) ||
 		    wa.override_redirect || wa.map_state != IsViewable)
 			continue;
 		adopt(wins[i], &wa);
 	}
+	scanning = 0;
 	if (wins)
 		XFree(wins);
 }
