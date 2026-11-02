@@ -3,9 +3,11 @@
  *
  * Carries the Cinnamon tweaks from linux-essentials over to plain X:
  *
- *   Super+arrows        the windows-snap ladder: halves, quarters, max, min
+ *   Super+arrows        the windows-snap ladder: halves, quarters, max, min;
+ *                       a half crosses to the next monitor before wrapping
  *   Super+Shift+Left/Right  move the window to the next monitor
- *   Alt+Tab             MRU switcher with small live thumbnails, shows at
+ *   Alt+Tab             MRU switcher with small live thumbnails on the
+ *                       pointer's monitor, shows at
  *                       once, Left/Right move along it too, Q closes the
  *                       highlighted window, Esc cancels
  *   Ctrl+Shift+W        close, except in terminals, which keep it for tabs
@@ -368,6 +370,8 @@ struct app {
 
 static struct app *apps;
 static int napps, launching, launchsession, superalone, noauto;
+/* snapped to a half by Super+arrow: assist waits for Super to go up */
+static struct client *assistpend;
 static int match[LAUNCHROWS], nmatch, launchsel;
 static char query[128];
 static size_t qlen;
@@ -375,6 +379,7 @@ static size_t qlen;
 static void handle(XEvent *ev);
 static void focus(struct client *c);
 static void drawtab(void);
+static void movemon(struct client *c, int dir);
 static void osdrun(const char *cmd, int what);
 static void endtab(struct client *c);
 static void placegrips(void);
@@ -897,6 +902,16 @@ static void snap(struct client *c, int dir)
 
 	if (c->fixed || c->fullscreen)
 		return;
+	/* a half pushed against a neighbouring monitor crosses onto its
+	 * near half; only at the outer edge does it wrap as the ladder says */
+	if ((c->state == LEFT && dir == D_LEFT && clientmon(c) > 0) ||
+	    (c->state == RIGHT && dir == D_RIGHT &&
+	     clientmon(c) < nmons - 1)) {
+		c->state = dir == D_LEFT ? RIGHT : LEFT;
+		movemon(c, dir == D_LEFT ? -1 : +1);
+		assistpend = c;
+		return;
+	}
 	next = ladder[c->state][dir];
 	if (next == NOP)
 		return;
@@ -906,8 +921,7 @@ static void snap(struct client *c, int dir)
 	}
 	c->state = next;
 	arrange(c, clientmon(c));
-	if (next == LEFT || next == RIGHT)
-		assiststart(c);
+	assistpend = next == LEFT || next == RIGHT ? c : NULL;
 }
 
 static void movemon(struct client *c, int dir)
@@ -1205,6 +1219,8 @@ static void unmanage(struct client *c, int destroyed)
 	for (pp = &clients; *pp != c; pp = &(*pp)->next)
 		;
 	*pp = c->next;
+	if (assistpend == c)
+		assistpend = NULL;
 
 	for (i = 0; i < ntab && tab[i] != c; i++)
 		;
@@ -1757,7 +1773,7 @@ static int updatethumb(struct client *c)
 static void drawtab(void)
 {
 	struct rect r = tabassist ? zonerect(assistzone, assistmon) :
-			mons[sel ? clientmon(sel) : pointermon()];
+			mons[pointermon()];
 	int pad = 10, lh = font->ascent + font->descent + 8;
 	int cw = THUMBW + 2 * pad, ch = THUMBH + lh + 2 * pad;
 	int cols = max(min(ntab, (r.w - 4 * pad) / cw), 1);
@@ -2992,6 +3008,12 @@ static void keyrelease(XEvent *e)
 	} else if (superalone && (sym == XK_Super_L || sym == XK_Super_R)) {
 		superalone = 0;
 		launchstart(0);
+	} else if (assistpend && (sym == XK_Super_L || sym == XK_Super_R)) {
+		struct client *c = assistpend;
+
+		assistpend = NULL;
+		if (c->state == LEFT || c->state == RIGHT)
+			assiststart(c);
 	}
 }
 
