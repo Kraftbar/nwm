@@ -104,6 +104,12 @@
 #define MUTEDICON	"\U0001f568"	/* speaker without waves */
 #define LIGHTICON	"\u2600"
 #define SOUNDCMD	"cinnamon-settings sound"
+#define NIGHT		"\u263e"	/* toggles the night light, NIGHTCMD */
+/* warm to 1000K or back, and leave a mark so autostart's schedule loop
+ * holds off until its next switch */
+#define NIGHTCMD	"touch \"${XDG_RUNTIME_DIR:-/tmp}/nwm-night\"; " \
+			"t=$(xsct | awk '{print $5; exit}'); " \
+			"[ \"${t:-6500}\" -lt 6500 ] && xsct 0 || xsct 1000"
 #define CHARGING	"\u26a1"	/* before the battery level, on AC */
 #define PSU		"/sys/class/power_supply"
 #define TRAYSZ		20	/* tray icon size, square */
@@ -322,6 +328,7 @@ static struct bar {
 	int nbtn;
 	int powerx;		/* where the power button starts */
 	int soundx, soundend;	/* the sound button, on the first bar */
+	int nightx;		/* the night light one, left of it */
 } bars[MAXMONS];
 static int nbars, bardirty;
 static long long hideat;	/* ms, monotonic; 0 when no hide is due */
@@ -2271,7 +2278,7 @@ static void drawonebar(int m)
 
 	/*
 	 * right to left, BARGAP of empty bar between the ink of each: power
-	 * button, clock, battery, memory, swap, zram, then on the first bar sound, tray icons
+	 * button, clock, battery, memory, swap, zram, then on the first bar sound, night light, tray icons
 	 * and status. Icons get a little more, since a thin glyph with the
 	 * same gap looks closer than text does.
 	 */
@@ -2290,11 +2297,13 @@ static void drawonebar(int m)
 	if (m == 0 && *zram)
 		right = drawright(b->draw, right, base, zram) - BARGAP;
 	/* the sound button sits with the tray icons, which it stands in for */
-	b->soundx = b->soundend = 0;
+	b->soundx = b->soundend = b->nightx = 0;
 	if (m == 0) {
 		b->soundend = right + BARGAP / 2;
 		right = drawright(b->draw, right, base, SOUND) - BARGAP;
 		b->soundx = right + BARGAP / 2;
+		right = drawright(b->draw, right, base, NIGHT) - BARGAP;
+		b->nightx = right + BARGAP / 2;
 	}
 	for (i = ntray - 1; m == 0 && i >= 0; i--) {
 		if (!tray[i].mapped)
@@ -2369,6 +2378,10 @@ static void barclick(struct bar *b, int x)
 	}
 	if (x >= b->soundx && x < b->soundend) {
 		spawn(SOUNDCMD);
+		return;
+	}
+	if (x >= b->nightx && x < b->soundx) {
+		spawn(NIGHTCMD);
 		return;
 	}
 	for (i = 0; i < b->nbtn; i++) {

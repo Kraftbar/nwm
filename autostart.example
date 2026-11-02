@@ -26,8 +26,10 @@ done &
 cinnamon-screensaver &
 
 # Night light in the hours Cinnamon's is set to, which under nwm does
-# nothing. Only changes are applied, so xsct by hand holds until the next.
+# nothing. Only changes are applied, so xsct by hand holds until the next;
+# the bar's moon button leaves a mark that says so until then too.
 night=1000
+mark=${XDG_RUNTIME_DIR:-/tmp}/nwm-night
 nl=org.cinnamon.settings-daemon.plugins.color
 was=
 while :; do
@@ -38,9 +40,14 @@ while :; do
 		split($1, t, ":"); h = t[1] + t[2] / 60; f = $2 + 0; e = $3 + 0
 		on = f <= e ? (h >= f && h < e) : (h >= f || h < e)
 		print on ? "on" : "off" }')
+	# csd-color puts the screen back to 6500K at login and resume
+	cur=$(xsct | awk '{print $5; exit}')
 	if [ "$is" != "$was" ]; then
+		rm -f "$mark"
 		[ "$is" = on ] && xsct $night || xsct 0
 		was=$is
+	elif [ "$is" = on ] && [ "${cur:-0}" -ge 6500 ] && [ ! -e "$mark" ]; then
+		xsct $night
 	fi
 	sleep 60
 done &
