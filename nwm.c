@@ -1790,6 +1790,8 @@ static void drawtab(void)
 	int w = cols * cw + 2 * pad, h = rows * ch + 2 * pad, i, x, y;
 	int ox = pad, oy = pad;
 	char title[512];
+	Pixmap buf;
+	Picture pic = None;
 
 	/* snap assist covers its whole half, the cards centred on it */
 	if (tabassist) {
@@ -1800,10 +1802,13 @@ static void drawtab(void)
 	}
 	tabx = r.x + (r.w - w) / 2;
 	taby = r.y + (r.h - h) / 2;
-	XMoveResizeWindow(dpy, tabwin, tabx, taby, w, h);
-	XMapRaised(dpy, tabwin);
+	/* drawn offscreen and copied in one go, so cycling does not flicker */
+	buf = XCreatePixmap(dpy, tabwin, w, h, DefaultDepth(dpy, scr));
+	XftDrawChange(tabdraw, buf);
+	if (composite)
+		pic = XRenderCreatePicture(dpy, buf, rootfmt, 0, NULL);
 	if (tabassist && assistbgpic)
-		XRenderComposite(dpy, PictOpSrc, assistbgpic, None, tabpic,
+		XRenderComposite(dpy, PictOpSrc, assistbgpic, None, pic,
 				 0, 0, 0, 0, 0, 0, w, h);
 	else
 		XftDrawRect(tabdraw, &xc_bg, 0, 0, w, h);
@@ -1817,7 +1822,7 @@ static void drawtab(void)
 			XftDrawRect(tabdraw, &xc_sel, x, y, cw, ch);
 		if (updatethumb(tab[i]))
 			XRenderComposite(dpy, PictOpSrc, tab[i]->thumbpic, None,
-					 tabpic, 0, 0, 0, 0, x + pad, y + pad,
+					 pic, 0, 0, 0, 0, x + pad, y + pad,
 					 THUMBW, THUMBH);
 		else
 			XftDrawRect(tabdraw, &xc_box, x + pad, y + pad,
@@ -1831,6 +1836,13 @@ static void drawtab(void)
 			 y + pad + THUMBH + (lh + font->ascent - font->descent) / 2,
 			 title);
 	}
+	XMoveResizeWindow(dpy, tabwin, tabx, taby, w, h);
+	XMapRaised(dpy, tabwin);
+	XCopyArea(dpy, buf, tabwin, DefaultGC(dpy, scr), 0, 0, w, h, 0, 0);
+	XftDrawChange(tabdraw, tabwin);
+	if (pic)
+		XRenderFreePicture(dpy, pic);
+	XFreePixmap(dpy, buf);
 }
 
 /*
@@ -2006,7 +2018,9 @@ static void tabkey(KeySym sym, unsigned int state)
 		tabsel = (tabsel + (state & ShiftMask ? -1 : 1) + ntab) % ntab;
 		drawtab();
 	} else if (sym == XK_Right || sym == XK_Left) {
-		tabsel = (tabsel + (sym == XK_Right ? 1 : -1) + ntab) % ntab;
+		/* arrows (and the touchpad swipe) stop at the ends */
+		tabsel = max(min(tabsel + (sym == XK_Right ? 1 : -1),
+				 ntab - 1), 0);
 		drawtab();
 	} else if (sym == XK_q) {
 		/* the list drops it once it is really gone (alttab-close@nybo) */
