@@ -34,7 +34,8 @@
  *
  * At start it runs the XDG autostart entries for "nwm:X-Cinnamon", so the
  * same daemons and tray apps come up as under Cinnamon, then
- * ~/.config/nwm/autostart.
+ * ~/.config/nwm/autostart. ~/.config/nwm/displays runs before it, and
+ * again whenever a screen is plugged in or out, to lay them out (xrandr).
  *
  * Build with make, try it nested with make run.
  */
@@ -60,6 +61,7 @@
 #include <X11/XF86keysym.h>
 #include <X11/extensions/Xcomposite.h>
 #include <X11/extensions/Xinerama.h>
+#include <X11/extensions/Xrandr.h>
 #include <X11/extensions/Xrender.h>
 #include <X11/Xft/Xft.h>
 
@@ -287,6 +289,7 @@ struct dock {
 static Display *dpy;
 static Window root, checkwin, tabwin, osdwin;
 static int scr, sw, sh, otherwm;
+static int rrbase = -1;			/* XRandR event base */
 static volatile sig_atomic_t running = 1, restarting;
 static Atom atom[NATOMS];
 static unsigned long pix_focus, pix_normal;
@@ -406,6 +409,12 @@ static void spawn(const char *cmd)
 	sigaction(SIGCHLD, &sa, NULL);
 	execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
 	_exit(127);
+}
+
+static void displays(void)
+{
+	spawn("f=\"${XDG_CONFIG_HOME:-$HOME/.config}/nwm/displays\"; "
+	      "[ -x \"$f\" ] && exec \"$f\"");
 }
 
 static unsigned int cleanmask(unsigned int mask)
@@ -3091,11 +3100,36 @@ static void unmapnotify(XEvent *e)
 	}
 }
 
+/*
+ * A screen plugged in or out: the displays script lays them out. Only a
+ * change of connection counts, not the ones the script itself makes.
+ */
+static void outputchange(XRROutputChangeNotifyEvent *ev)
+{
+	static struct { RROutput out; int conn; } seen[16];
+	int i;
+
+	for (i = 0; i < 16 && seen[i].out && seen[i].out != ev->output; i++)
+		;
+	if (i < 16) {
+		if (seen[i].out == ev->output && seen[i].conn == ev->connection)
+			return;
+		seen[i].out = ev->output;
+		seen[i].conn = ev->connection;
+	}
+	displays();
+}
+
 static void handle(XEvent *ev)
 {
 	struct client *c;
 	int i;
 
+	if (rrbase >= 0 && ev->type == rrbase + RRNotify) {
+		if (((XRRNotifyEvent *)ev)->subtype == RRNotify_OutputChange)
+			outputchange((XRROutputChangeNotifyEvent *)ev);
+		return;
+	}
 	switch (ev->type) {
 	case ButtonPress:
 		buttonpress(ev);
@@ -3297,6 +3331,14 @@ static void setup(void)
 	if (otherwm)
 		die("nwm: another window manager is running\n");
 	XSetErrorHandler(xerror);
+	{
+		int err;
+
+		if (XRRQueryExtension(dpy, &rrbase, &err))
+			XRRSelectInput(dpy, root, RROutputChangeNotifyMask);
+		else
+			rrbase = -1;
+	}
 
 	XInternAtoms(dpy, atomname, NATOMS, False, atom);
 	XkbSetDetectableAutoRepeat(dpy, True, NULL);
@@ -3364,6 +3406,7 @@ static void setup(void)
 	scan();
 	if (noauto)
 		return;
+	displays();
 	autostart();
 	spawn("f=\"${XDG_CONFIG_HOME:-$HOME/.config}/nwm/autostart\"; "
 	      "[ -x \"$f\" ] && exec \"$f\"");

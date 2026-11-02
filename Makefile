@@ -1,5 +1,5 @@
 CFLAGS ?= -O2 -Wall -Wextra -Wno-missing-field-initializers
-PKGS = x11 xinerama xft fontconfig xcomposite xrender
+PKGS = x11 xinerama xrandr xft fontconfig xcomposite xrender
 PREFIX ?= /usr/local
 
 nwm: nwm.c
