@@ -27,13 +27,19 @@ install: nwm
 	install -Dm644 nwm.desktop $(DESTDIR)/usr/share/xsessions/nwm.desktop
 
 # Binary, touchpad read access, and an autostart entry for an nwm session.
-# Log in again so the udev rule applies. Does not touch nwm itself.
+# Reloads udev on this machine. Log in again so logind grants the ACL and
+# autostart starts the daemon. Logging in alone does not apply a newly
+# installed rule. Does not touch nwm itself.
 install-gestures: gesture_detector
 	install -Dm755 gesture_detector $(DESTDIR)$(PREFIX)/bin/nwm-gestures
 	install -Dm644 gestures/70-touchpad.rules \
 		$(DESTDIR)/etc/udev/rules.d/70-nwm-touchpad.rules
 	install -Dm644 gestures/nwm-gestures.desktop \
 		$(DESTDIR)/etc/xdg/autostart/nwm-gestures.desktop
+	if [ -z "$(DESTDIR)" ]; then \
+		udevadm control --reload-rules && \
+		udevadm trigger --subsystem-match=input; \
+	fi
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nwm $(DESTDIR)/usr/share/xsessions/nwm.desktop

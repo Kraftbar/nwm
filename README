@@ -90,8 +90,10 @@ Touchpad swipes
 
 	That installs nwm-gestures on PATH, a udev rule that lets whoever is
 	at the screen read touchpads, and an autostart entry for the nwm
-	session only. Log in again so the rule applies. Another gesture
-	daemon, such as Touchégg, has to be stopped or it takes the swipes.
+	session only. The install reloads udev. Log in again so logind grants
+	the ACL and autostart starts the daemon. Logging in alone does not
+	apply a newly installed rule. Another gesture daemon, such as
+	Touchégg, has to be stopped or it takes the swipes.
 
 Not yet
 	display menu, workspaces.

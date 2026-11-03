@@ -57,7 +57,14 @@ static int open_input(const char *path, int flags, void *data) {
     udev_unref(u);
     if (!allowed) return -EACCES;
     int fd = open(path, flags | O_CLOEXEC);
-    if (fd < 0) { int e = errno; fprintf(stderr, "%s: %s\n", path, strerror(e)); return -e; }
+    if (fd < 0) {
+        int e = errno;
+        if (e == EACCES)
+            fprintf(stderr, "%s: touchpad is present and this session cannot read it\n", path);
+        else
+            fprintf(stderr, "%s: %s\n", path, strerror(e));
+        return -e;
+    }
     return fd;
 }
 static void close_input(int fd, void *data) { (void)data; close(fd); }
@@ -139,6 +146,63 @@ static int self_test(void) {
     puts("Passed: swipe direction, threshold, cancellation, reversal, duplicate-end, and two-finger Back checks");
     return 0;
 }
+/* True when pid's argv0, ignoring any directory, is name. */
+static bool cmdline_is(pid_t pid, const char *name) {
+    char path[64], buf[256], *base;
+    int fd;
+    ssize_t n;
+    if (pid <= 0 || snprintf(path, sizeof path, "/proc/%ld/cmdline", (long)pid) >= (int)sizeof path)
+        return false;
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+    base = strrchr(buf, '/');
+    return strcmp(base ? base + 1 : buf, name) == 0;
+}
+/* Logout does not stop this process, so the next login finds the lock taken.
+ * The pid is written only after the lock is ours. A leftover nwm-gestures is
+ * replaced; any other holder keeps the lock. */
+static void write_lock_pid(int lock) {
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%ld\n", (long)getpid());
+    if (n < 0 || ftruncate(lock, 0) < 0 || lseek(lock, 0, SEEK_SET) < 0) return;
+    if (write(lock, buf, (size_t)n) != n) return;
+}
+static pid_t read_lock_pid(int lock) {
+    char buf[32], *end;
+    ssize_t n;
+    long pid;
+    if (lseek(lock, 0, SEEK_SET) < 0) return -1;
+    n = read(lock, buf, sizeof buf - 1);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    pid = strtol(buf, &end, 10);
+    if (end == buf || pid <= 0) return -1;
+    return (pid_t)pid;
+}
+static int take_lock(int lock) {
+    pid_t pid;
+    int i;
+    if (flock(lock, LOCK_EX | LOCK_NB) == 0) {
+        write_lock_pid(lock);
+        return 0;
+    }
+    pid = read_lock_pid(lock);
+    if (cmdline_is(pid, "nwm-gestures")) {
+        kill(pid, SIGTERM);
+        for (i = 0; i < 20; i++) {
+            if (flock(lock, LOCK_EX | LOCK_NB) == 0) {
+                write_lock_pid(lock);
+                return 0;
+            }
+            poll(NULL, 0, 50);
+        }
+    }
+    return -1;
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--self-test")) return self_test();
     if (argc == 2 && !strcmp(argv[1], "--dry-run")) dry_run = true;
@@ -148,7 +212,7 @@ int main(int argc, char **argv) {
     char lockpath[4096];
     if (snprintf(lockpath, sizeof lockpath, "%s/nwm-gestures.lock", runtime) >= (int)sizeof lockpath) return 1;
     int lock = open(lockpath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) < 0) { fputs("Cannot lock; another instance may be running\n", stderr); return 1; }
+    if (lock < 0 || take_lock(lock) < 0) { fputs("Cannot lock; another instance may be running\n", stderr); return 1; }
     struct udev *u = udev_new();
     if (!u) return 1;
     struct libinput *li = libinput_udev_create_context(&interface, NULL, u);
