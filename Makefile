@@ -6,6 +6,16 @@ nwm: nwm.c
 	$(CC) $(CFLAGS) $$(pkg-config --cflags $(PKGS)) -o $@ nwm.c \
 		$$(pkg-config --libs $(PKGS))
 
+# Swipes are a separate program. X does not deliver them, so it opens the
+# touchpad itself. `make` does not build it.
+gesture_detector: gestures/gesture_detector.c
+	$(CC) -std=c11 $(CFLAGS) -Werror $$(pkg-config --cflags libinput libudev) \
+		-o $@ gestures/gesture_detector.c \
+		$$(pkg-config --libs libinput libudev) -lm
+
+check-gestures: gesture_detector
+	./gesture_detector --self-test
+
 # Nested in a window on the running desktop, on its own D-Bus: without
 # that, Super+L in there locks the real screen.
 run: nwm
@@ -20,6 +30,6 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nwm $(DESTDIR)/usr/share/xsessions/nwm.desktop
 
 clean:
-	rm -f nwm
+	rm -f nwm gesture_detector
 
-.PHONY: run install uninstall clean
+.PHONY: run install uninstall clean check-gestures

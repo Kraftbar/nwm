@@ -1,0 +1,3 @@
+#!/bin/sh
+systemctl --user import-environment DISPLAY XAUTHORITY XDG_RUNTIME_DIR
+exec systemctl --user start nybo-gestures.service

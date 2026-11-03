@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Custom C gestures
+Exec=/home/nybo/.local/bin/start-nybo-gestures
+Terminal=false
+OnlyShowIn=XFCE;nwm;

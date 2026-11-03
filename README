@@ -62,6 +62,31 @@ Updating
 	kill -USR1 $(pidof nwm) restarts it in place, into whatever nwm is
 	first on PATH now; windows and tray icons stay.
 
+Touchpad swipes
+	gestures/gesture_detector.c, built with `make gesture_detector`,
+	checked with `make check-gestures`. Not linked into nwm. X does not
+	deliver swipes, so the program opens the touchpad with libinput and
+	sends keys nwm already handles. It releases Alt when it exits.
+
+	Three fingers sideways	holds the Alt+Tab switcher open; the selection
+				follows the fingers, lifting picks, a cancelled
+				swipe escapes. Left/Right stop at the ends.
+	Three fingers up/down	Super+Up/Down, the snap ladder. Only if the
+				sideways switcher did not open.
+	Two fingers right	Alt+Left (Back), once, at the end of a
+				deliberate horizontal scroll. Left does not
+				trigger Forward. The app still receives the scroll.
+
+	Short moves, diagonals and reversals are ignored. The numbers are
+	in the source: 60 units to fire, the switcher shows after 8 and
+	steps every 40.
+
+	gestures/70-nybo-touchpad.rules lets the desktop user read the
+	Lenovo 17ef:60c1 pad. gestures/activate.sh installs that rule,
+	hides Touchégg (it would take the same swipes) and starts
+	nybo-gestures.service on the built binary. Only touchpads are
+	opened.
+
 Not yet
 	display menu, workspaces.
 

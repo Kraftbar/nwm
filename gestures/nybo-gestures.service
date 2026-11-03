@@ -1,0 +1,7 @@
+# gestures/activate.sh replaces @BIN@ with the built gesture_detector.
+[Unit]
+Description=Custom C touchpad gestures
+[Service]
+ExecStart=@BIN@
+Restart=on-failure
+RestartSec=3
