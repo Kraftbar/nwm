@@ -26,10 +26,24 @@ install: nwm
 	install -Dm755 nwm $(DESTDIR)$(PREFIX)/bin/nwm
 	install -Dm644 nwm.desktop $(DESTDIR)/usr/share/xsessions/nwm.desktop
 
+# Binary, touchpad read access, and an autostart entry for an nwm session.
+# Log in again so the udev rule applies. Does not touch nwm itself.
+install-gestures: gesture_detector
+	install -Dm755 gesture_detector $(DESTDIR)$(PREFIX)/bin/nwm-gestures
+	install -Dm644 gestures/70-touchpad.rules \
+		$(DESTDIR)/etc/udev/rules.d/70-nwm-touchpad.rules
+	install -Dm644 gestures/nwm-gestures.desktop \
+		$(DESTDIR)/etc/xdg/autostart/nwm-gestures.desktop
+
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nwm $(DESTDIR)/usr/share/xsessions/nwm.desktop
+
+uninstall-gestures:
+	rm -f $(DESTDIR)$(PREFIX)/bin/nwm-gestures \
+		$(DESTDIR)/etc/udev/rules.d/70-nwm-touchpad.rules \
+		$(DESTDIR)/etc/xdg/autostart/nwm-gestures.desktop
 
 clean:
 	rm -f nwm gesture_detector
 
-.PHONY: run install uninstall clean check-gestures
+.PHONY: run install install-gestures uninstall uninstall-gestures clean check-gestures

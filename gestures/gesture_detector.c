@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime || (!dry_run && !getenv("DISPLAY"))) { fputs("Run in your X11 desktop session\n", stderr); return 1; }
     char lockpath[4096];
-    if (snprintf(lockpath, sizeof lockpath, "%s/nybo-gestures.lock", runtime) >= (int)sizeof lockpath) return 1;
+    if (snprintf(lockpath, sizeof lockpath, "%s/nwm-gestures.lock", runtime) >= (int)sizeof lockpath) return 1;
     int lock = open(lockpath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) < 0) { fputs("Cannot lock; another instance may be running\n", stderr); return 1; }
     struct udev *u = udev_new();

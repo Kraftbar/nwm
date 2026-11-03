@@ -1,0 +1,3 @@
+# The active session may read touchpads. systemd does not grant that
+# itself. The program refuses every device that is not a touchpad.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TOUCHPAD}=="1", TAG+="uaccess"

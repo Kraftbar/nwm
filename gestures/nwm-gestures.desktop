@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=nwm touchpad swipes
+Exec=nwm-gestures
+Terminal=false
+OnlyShowIn=nwm;

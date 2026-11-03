@@ -63,10 +63,10 @@ Updating
 	first on PATH now; windows and tray icons stay.
 
 Touchpad swipes
-	gestures/gesture_detector.c, built with `make gesture_detector`,
-	checked with `make check-gestures`. Not linked into nwm. X does not
-	deliver swipes, so the program opens the touchpad with libinput and
-	sends keys nwm already handles. It releases Alt when it exits.
+	Optional. Not linked into nwm, and `make` does not build it. X does
+	not deliver three-finger swipes, so gestures/gesture_detector.c opens
+	the touchpad with libinput and sends the keys above. It talks to any
+	touchpad and never opens a keyboard. It releases Alt when it exits.
 
 	Three fingers sideways	holds the Alt+Tab switcher open; the selection
 				follows the fingers, lifting picks, a cancelled
@@ -81,11 +81,17 @@ Touchpad swipes
 	in the source: 60 units to fire, the switcher shows after 8 and
 	steps every 40.
 
-	gestures/70-nybo-touchpad.rules lets the desktop user read the
-	Lenovo 17ef:60c1 pad. gestures/activate.sh installs that rule,
-	hides Touchégg (it would take the same swipes) and starts
-	nybo-gestures.service on the built binary. Only touchpads are
-	opened.
+	Build needs libinput and libudev (pkg-config). Sending keys needs
+	xdotool.
+
+	make gesture_detector
+	make check-gestures	the self-test, no touchpad involved
+	sudo make install-gestures
+
+	That installs nwm-gestures on PATH, a udev rule that lets whoever is
+	at the screen read touchpads, and an autostart entry for the nwm
+	session only. Log in again so the rule applies. Another gesture
+	daemon, such as Touchégg, has to be stopped or it takes the swipes.
 
 Not yet
 	display menu, workspaces.

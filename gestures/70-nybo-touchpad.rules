@@ -1,2 +1,0 @@
-# Let the active local desktop user read this Lenovo touchpad only.
-ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TOUCHPAD}=="1", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="60c1", TAG+="uaccess"
