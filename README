@@ -34,8 +34,9 @@ Bar
 	(⚡ on AC), a
 	clock and a power button
 	(lock, log out, suspend, restart, shut down). The first one
-	also has status text, tray icons and a sound button (Cinnamon's sound
-	settings). The status text is the root
+	also has status text, tray icons and a sound button (click for a
+	volume slider, click its speaker to mute, right click for Cinnamon's
+	sound settings). The status text is the root
 	window name, set with xsetroot -name.
 
 No title bars; apps with their own (Chrome, GTK) drag as usual.

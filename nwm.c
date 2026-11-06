@@ -98,9 +98,13 @@
 #define OSDTIME		600	/* ms the volume or brightness box stays up */
 #define OSDW		300
 #define OSDH		56
+#define OSDPAD		16
+#define OSDBX		(OSDPAD + 40)	/* where its bar starts */
+#define OSDBW		(OSDW - OSDBX - OSDPAD - 56)
+#define VOLTIME		10000	/* ms the bar's sound slider waits for use */
 #define CLOCK		"%a %d %b  %H:%M"
 #define POWER		"\u23fb"	/* the bar's power button */
-#define SOUND		"\U0001f56a"	/* opens SOUNDCMD */
+#define SOUND		"\U0001f56a"	/* click: slider; right click: SOUNDCMD */
 #define MUTEDICON	"\U0001f568"	/* speaker without waves */
 #define LIGHTICON	"\u2600"
 #define SOUNDCMD	"cinnamon-settings sound"
@@ -131,6 +135,7 @@
 #define VOL		"wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ "
 #define MUTE		"wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 #define MICMUTE		"wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"
+#define UNMUTE		"wpctl set-mute @DEFAULT_AUDIO_SINK@ 0"
 /* brightness through logind, the backlight file being root's; never off */
 #define LIGHT(d)	"b=$(brightnessctl g) m=$(brightnessctl m); " \
 			"b=$((b " d " m / 20)); [ $b -lt $((m / 20)) ] && " \
@@ -146,7 +151,7 @@
 			"/MUTED/ ? \" m\" : \"\" }'"
 
 enum { K_SNAP, K_MOVEMON, K_CLOSE, K_TAB, K_SPAWN, K_OSD, K_QUIT };
-enum { O_SOUND, O_LIGHT };	/* what K_OSD shows the level of */
+enum { O_SOUND, O_LIGHT, O_SLIDER };	/* what K_OSD shows the level of */
 enum { D_LEFT, D_RIGHT, D_UP, D_DOWN };
 
 struct key {
@@ -362,6 +367,8 @@ static int osdfd = -1, osdwhat;
 static char osdbuf[64];
 static size_t osdlen;
 static long long osdhideat;	/* ms, monotonic; 0 when it is not up */
+/* The same box as a slider over the bar's sound button, holding the pointer */
+static int volpop, voldrag, vollevel, volpending, volx;
 static XftColor xc_bg, xc_sel, xc_fg, xc_dim, xc_box;
 static int composite;		/* Composite and Render are there */
 static Picture tabpic;
@@ -391,6 +398,10 @@ static void focus(struct client *c);
 static void drawtab(void);
 static void movemon(struct client *c, int dir);
 static void osdrun(const char *cmd, int what);
+static void volopen(void);
+static void volclose(void);
+static void volpress(XButtonEvent *ev);
+static void volmotion(int x);
 static void endtab(struct client *c);
 static void placegrips(void);
 static int updatethumb(struct client *c);
@@ -2083,6 +2094,8 @@ static void autohide(void)
 	unsigned int mask;
 	struct rect m;
 
+	if (volpop)
+		return;
 	XQueryPointer(dpy, root, &dw, &dw, &x, &y, &di, &di, &mask);
 	for (i = 0; i < nbars; i++) {
 		m = mons[i];
@@ -2365,19 +2378,25 @@ static void drawbar(void)
 
 /*
  * Click a window to bring it up, or the focused one to minimize it; the
- * power button opens the session entries, the sound one the sound settings.
+ * power button opens the session entries, the sound one a slider, or the
+ * sound settings with the right button.
  */
-static void barclick(struct bar *b, int x)
+static void barclick(struct bar *b, int x, unsigned int button)
 {
 	struct client *c;
 	int i;
 
-	if (x >= b->powerx) {
-		launchstart(1);
+	if (x >= b->soundx && x < b->soundend) {
+		if (button == Button1)
+			volopen();
+		else if (button == Button3)
+			spawn(SOUNDCMD);
 		return;
 	}
-	if (x >= b->soundx && x < b->soundend) {
-		spawn(SOUNDCMD);
+	if (button != Button1)
+		return;
+	if (x >= b->powerx) {
+		launchstart(1);
 		return;
 	}
 	if (x >= b->nightx && x < b->soundx) {
@@ -2867,13 +2886,16 @@ static void buttonpress(XEvent *e)
 
 	/* Super+drag is not a tap on Super */
 	superalone = 0;
+	if (volpop) {
+		volpress(ev);
+		return;
+	}
 	if (tabbing && tabassist) {
 		assistclick(ev->x_root, ev->y_root);
 		return;
 	}
 	if ((b = findbar(ev->window))) {
-		if (ev->button == Button1)
-			barclick(b, ev->x);
+		barclick(b, ev->x, ev->button);
 		return;
 	}
 	for (i = 0; i < 8; i++)
@@ -2975,6 +2997,8 @@ static void keypress(XEvent *e)
 	unsigned int mod = cleanmask(ev->state);
 	size_t i;
 
+	/* keys may want the pointer, or a box of their own */
+	volclose();
 	if (tabbing && !tabassist) {
 		tabkey(sym, ev->state);
 		return;
@@ -3160,6 +3184,13 @@ static void handle(XEvent *ev)
 	switch (ev->type) {
 	case ButtonPress:
 		buttonpress(ev);
+		break;
+	case ButtonRelease:
+		voldrag = 0;
+		break;
+	case MotionNotify:
+		if (voldrag)
+			volmotion(ev->xmotion.x_root);
 		break;
 	case ClientMessage:
 		clientmessage(ev);
@@ -3497,6 +3528,7 @@ static void osdrun(const char *cmd, int what)
 	struct sigaction sa = { .sa_handler = SIG_DFL };
 	int fd[2];
 
+	volpending = 0;
 	if (osdfd >= 0)
 		close(osdfd);
 	osdfd = -1;
@@ -3522,22 +3554,92 @@ static void osdrun(const char *cmd, int what)
 static void drawosd(int level, int muted)
 {
 	struct rect r = mons[sel ? clientmon(sel) : pointermon()];
-	int pad = 16, base = (OSDH + font->ascent - font->descent) / 2;
-	int bx = pad + 40, bw = OSDW - bx - pad - 56, bh = 6;
+	int base = (OSDH + font->ascent - font->descent) / 2, bh = 6;
+	int fill = OSDBW * min(max(level, 0), 100) / 100;
 	char num[16];
 
-	XMoveResizeWindow(dpy, osdwin, r.x + (r.w - OSDW) / 2,
-			  r.y + r.h - OSDH - 4 * BARH, OSDW, OSDH);
+	if (volpop) {
+		r = mons[0];
+		volx = r.x + (bars[0].soundx + bars[0].soundend - OSDW) / 2;
+		volx = max(min(volx, r.x + r.w - OSDW - 8), r.x + 8);
+		XMoveResizeWindow(dpy, osdwin, volx,
+				  r.y + r.h - BARH - OSDH - 8, OSDW, OSDH);
+	} else {
+		XMoveResizeWindow(dpy, osdwin, r.x + (r.w - OSDW) / 2,
+				  r.y + r.h - OSDH - 4 * BARH, OSDW, OSDH);
+	}
 	XMapRaised(dpy, osdwin);
 	XftDrawRect(osddraw, &xc_bg, 0, 0, OSDW, OSDH);
-	drawtext(osddraw, &xc_fg, pad, base, osdwhat == O_LIGHT ? LIGHTICON :
+	drawtext(osddraw, &xc_fg, OSDPAD, base, osdwhat == O_LIGHT ? LIGHTICON :
 		 muted ? MUTEDICON : SOUND);
-	XftDrawRect(osddraw, &xc_box, bx, (OSDH - bh) / 2, bw, bh);
-	XftDrawRect(osddraw, muted ? &xc_dim : &xc_sel, bx, (OSDH - bh) / 2,
-		    bw * min(max(level, 0), 100) / 100, bh);
+	XftDrawRect(osddraw, &xc_box, OSDBX, (OSDH - bh) / 2, OSDBW, bh);
+	XftDrawRect(osddraw, muted ? &xc_dim : &xc_sel, OSDBX, (OSDH - bh) / 2,
+		    fill, bh);
+	if (volpop)
+		XftDrawRect(osddraw, &xc_fg, OSDBX + fill - 3,
+			    (OSDH - 3 * bh) / 2, 6, 3 * bh);
 	snprintf(num, sizeof(num), "%d%%", level);
-	drawright(osddraw, OSDW - pad, base, num);
-	osdhideat = nowms() + OSDTIME;
+	drawright(osddraw, OSDW - OSDPAD, base, num);
+	osdhideat = nowms() + (volpop ? VOLTIME : OSDTIME);
+}
+
+/* Unmuting too: dragging a muted slider should be heard. */
+static void volsend(void)
+{
+	char cmd[256];
+
+	snprintf(cmd, sizeof(cmd), VOL "%d%%; " UNMUTE "%s", vollevel, GETVOL);
+	osdrun(cmd, O_SLIDER);
+}
+
+/* One command at a time, or they could land out of order; the last one wins. */
+static void volmotion(int x)
+{
+	vollevel = min(max((x - volx - OSDBX) * 100 / OSDBW, 0), 100);
+	drawosd(vollevel, 0);
+	if (osdfd >= 0)
+		volpending = 1;
+	else
+		volsend();
+}
+
+/* The grab is what lets a click anywhere else put it away. */
+static void volopen(void)
+{
+	if (XGrabPointer(dpy, root, False, MOUSEMASK, GrabModeAsync,
+			 GrabModeAsync, None, cur_normal,
+			 CurrentTime) != GrabSuccess)
+		return;
+	volpop = 1;
+	osdhideat = nowms() + VOLTIME;
+	osdrun(":" GETVOL, O_SLIDER);
+}
+
+static void volclose(void)
+{
+	if (!volpop)
+		return;
+	volpop = voldrag = 0;
+	osdhideat = 0;
+	XUngrabPointer(dpy, CurrentTime);
+	XUnmapWindow(dpy, osdwin);
+	if (AUTOHIDE)
+		hideat = nowms() + HIDEDELAY;
+}
+
+static void volpress(XButtonEvent *ev)
+{
+	struct rect r = mons[0];
+	int x = ev->x_root - volx, y = ev->y_root - (r.y + r.h - BARH - OSDH - 8);
+
+	if (x < 0 || x >= OSDW || y < 0 || y >= OSDH) {
+		volclose();
+	} else if (ev->button == Button1 && x < OSDBX - OSDPAD / 2) {
+		osdrun(MUTE GETVOL, O_SLIDER);
+	} else if (ev->button == Button1) {
+		voldrag = 1;
+		volmotion(ev->x_root);
+	}
 }
 
 /* Take what the command printed; at its end, show the box. */
@@ -3553,6 +3655,12 @@ static void osdread(void)
 	close(osdfd);
 	osdfd = -1;
 	osdbuf[osdlen] = '\0';
+	if (volpending) {
+		volsend();
+		return;
+	}
+	if (osdwhat == O_SLIDER && (!volpop || voldrag))
+		return;
 	if (osdlen && osdbuf[0] >= '0' && osdbuf[0] <= '9')
 		drawosd(atoi(osdbuf), strstr(osdbuf, " m") != NULL);
 }
@@ -3589,6 +3697,7 @@ static int waitevent(void)
 	if (osdhideat && nowms() >= osdhideat) {
 		osdhideat = 0;
 		XUnmapWindow(dpy, osdwin);
+		volclose();
 	}
 	if (hideat && nowms() >= hideat) {
 		hideat = 0;
