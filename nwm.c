@@ -63,6 +63,7 @@
 #include <X11/extensions/Xinerama.h>
 #include <X11/extensions/Xrandr.h>
 #include <X11/extensions/Xrender.h>
+#include <X11/extensions/Xfixes.h>
 #include <X11/Xft/Xft.h>
 
 #define BORDER		0	/* px around windows, coloured by focus */
@@ -89,6 +90,12 @@
 #define MAXFALLBACK	8	/* fonts found for glyphs FONT lacks */
 #define MAXAPPS		1024
 #define LAUNCHROWS	10
+#define CLIPS		25	/* copied texts Super+V remembers, in memory */
+#define CLIPROWS	8	/* how many of them it shows */
+#define CLIPW		300
+#define CLIPMAX		(256 * 1024)	/* longer ones are not kept */
+#define PASTE		"xdotool key --clearmodifiers ctrl+v"
+#define PASTETERM	"xdotool key --clearmodifiers ctrl+shift+v"
 #define TERMINAL	"gnome-terminal --"	/* for Terminal=true apps */
 #define BARH		28	/* bottom bar on each monitor; 0 for none */
 #define BARBTN		220	/* widest a window button gets */
@@ -98,10 +105,11 @@
 #define OSDTIME		600	/* ms the volume or brightness box stays up */
 #define OSDW		300
 #define OSDH		56
-#define OSDPAD		16
-#define OSDBX		(OSDPAD + 40)	/* where its bar starts */
-#define OSDBW		(OSDW - OSDBX - OSDPAD - 56)
-#define VOLTIME		10000	/* ms the bar's sound slider waits for use */
+#define VOLW		36	/* the bar's sound slider, standing up */
+#define VOLH		160
+#define VOLTOP		36	/* its track, below the number */
+#define VOLBOT		(VOLH - 16)
+#define VOLTIME		10000	/* ms it waits for use */
 #define CLOCK		"%a %d %b  %H:%M"
 #define POWER		"\u23fb"	/* the bar's power button */
 #define SOUND		"\U0001f56a"	/* click: slider; right click: SOUNDCMD */
@@ -150,7 +158,7 @@
 			"'{ printf \"%d%s\\n\", $2 * 100 + 0.5, " \
 			"/MUTED/ ? \" m\" : \"\" }'"
 
-enum { K_SNAP, K_MOVEMON, K_CLOSE, K_TAB, K_SPAWN, K_OSD, K_QUIT };
+enum { K_SNAP, K_MOVEMON, K_CLOSE, K_TAB, K_SPAWN, K_OSD, K_CLIP, K_QUIT };
 enum { O_SOUND, O_LIGHT, O_SLIDER };	/* what K_OSD shows the level of */
 enum { D_LEFT, D_RIGHT, D_UP, D_DOWN };
 
@@ -171,6 +179,7 @@ static const struct key keys[] = {
 	{ SUPER | ShiftMask,	XK_Right,	K_MOVEMON,	+1 },
 	{ ALT,			XK_F4,		K_CLOSE },
 	{ SUPER,		XK_q,		K_CLOSE },
+	{ SUPER,		XK_v,		K_CLIP },
 	{ ALT,			XK_Tab,		K_TAB,		+1 },
 	{ ALT | ShiftMask,	XK_Tab,		K_TAB,		-1 },
 	{ ControlMask | ALT,	XK_t,		K_SPAWN, 0, "gnome-terminal" },
@@ -368,13 +377,23 @@ static char osdbuf[64];
 static size_t osdlen;
 static long long osdhideat;	/* ms, monotonic; 0 when it is not up */
 /* The same box as a slider over the bar's sound button, holding the pointer */
-static int volpop, voldrag, vollevel, volpending, volx;
+static int volpop, voldrag, vollevel, volpending, volx, voly;
 static XftColor xc_bg, xc_sel, xc_fg, xc_dim, xc_box;
 static int composite;		/* Composite and Render are there */
 static Picture tabpic;
 static XRenderPictFormat *rootfmt;
 
+/* Clipboard history, newest first */
+static char *clips[CLIPS];
+static int nclips, xfbase = -1;
+static Window clipwin;
+static Atom clipsel, cliputf8, cliptargets;
+static int clipx, clipy;	/* the pointer when Super+V opened the list */
+static struct rect cliprect;	/* where it is, for the pointer */
+static int cliprowy, clipliney;	/* its first row, and the height of one */
+
 /* Launcher, in the same popup window as Alt+Tab */
+enum { L_APPS, L_SESSION, L_CLIP };	/* what it lists */
 struct app {
 	char id[128];		/* desktop file name; the first one wins */
 	char name[128];
@@ -401,7 +420,7 @@ static void osdrun(const char *cmd, int what);
 static void volopen(void);
 static void volclose(void);
 static void volpress(XButtonEvent *ev);
-static void volmotion(int x);
+static void volmotion(int y);
 static void endtab(struct client *c);
 static void placegrips(void);
 static int updatethumb(struct client *c);
@@ -2396,7 +2415,7 @@ static void barclick(struct bar *b, int x, unsigned int button)
 	if (button != Button1)
 		return;
 	if (x >= b->powerx) {
-		launchstart(1);
+		launchstart(L_SESSION);
 		return;
 	}
 	if (x >= b->nightx && x < b->soundx) {
@@ -2755,12 +2774,127 @@ static void autostart(void)
 }
 
 /* Names starting with the query first, then names containing it. */
+/* Clipboard history: follow CLIPBOARD, and take it back to paste an old one */
+
+static void clipfront(int i)
+{
+	char *s = clips[i];
+
+	memmove(clips + 1, clips, i * sizeof(*clips));
+	clips[0] = s;
+}
+
+static void clipadd(const char *s)
+{
+	char *copy;
+	int i;
+
+	if (!s[strspn(s, " \t\r\n")])
+		return;
+	for (i = 0; i < nclips; i++)
+		if (!strcmp(clips[i], s)) {
+			clipfront(i);
+			return;
+		}
+	if (!(copy = strdup(s)))
+		return;
+	if (nclips == CLIPS)
+		free(clips[--nclips]);
+	memmove(clips + 1, clips, nclips * sizeof(*clips));
+	clips[0] = copy;
+	nclips++;
+}
+
+static void clipchanged(XFixesSelectionNotifyEvent *ev)
+{
+	if (ev->owner && ev->owner != clipwin)
+		XConvertSelection(dpy, clipsel, cliputf8, cliputf8, clipwin,
+				  ev->selection_timestamp);
+}
+
+/* Text only: images and such do not come as UTF-8 and end up here as None. */
+static void clipread(XSelectionEvent *ev)
+{
+	Atom type;
+	int format;
+	unsigned long n, after;
+	unsigned char *data = NULL;
+
+	if (ev->requestor != clipwin || ev->property == None)
+		return;
+	if (XGetWindowProperty(dpy, clipwin, ev->property, 0, CLIPMAX / 4, True,
+			       AnyPropertyType, &type, &format, &n, &after,
+			       &data) != Success)
+		return;
+	if (data && type == cliputf8 && format == 8 && !after)
+		clipadd((char *)data);
+	if (data)
+		XFree(data);
+}
+
+/* Another app pastes what we hold, always the newest in the history. */
+static void clipserve(XSelectionRequestEvent *ev)
+{
+	Atom targets[] = { cliptargets, cliputf8, XA_STRING };
+	XSelectionEvent re = {
+		.type = SelectionNotify, .requestor = ev->requestor,
+		.selection = ev->selection, .target = ev->target,
+		.time = ev->time,
+		.property = ev->property ? ev->property : ev->target,
+	};
+
+	if (ev->target == cliptargets)
+		XChangeProperty(dpy, re.requestor, re.property, XA_ATOM, 32,
+				PropModeReplace, (unsigned char *)targets,
+				LEN(targets));
+	else if ((ev->target == cliputf8 || ev->target == XA_STRING) && nclips)
+		XChangeProperty(dpy, re.requestor, re.property, ev->target, 8,
+				PropModeReplace, (unsigned char *)clips[0],
+				strlen(clips[0]));
+	else
+		re.property = None;
+	XSendEvent(dpy, re.requestor, False, 0, (XEvent *)&re);
+}
+
+/* The focused app gets it pasted, as on Windows; it stays on the clipboard. */
+static void clippaste(int i)
+{
+	clipfront(i);
+	XSetSelectionOwner(dpy, clipsel, clipwin, CurrentTime);
+	XFlush(dpy);
+	if (sel)
+		spawn(keepsclose(sel) ? PASTETERM : PASTE);
+}
+
+static void clipstart(void)
+{
+	int err;
+
+	if (!XFixesQueryExtension(dpy, &xfbase, &err)) {
+		xfbase = -1;
+		return;
+	}
+	clipsel = XInternAtom(dpy, "CLIPBOARD", False);
+	cliputf8 = XInternAtom(dpy, "UTF8_STRING", False);
+	cliptargets = XInternAtom(dpy, "TARGETS", False);
+	clipwin = XCreateSimpleWindow(dpy, root, 0, 0, 1, 1, 0, 0, 0);
+	XFixesSelectSelectionInput(dpy, root, clipsel,
+				   XFixesSetSelectionOwnerNotifyMask);
+}
+
 static void filter(void)
 {
 	int pass, i;
 	char *p;
 
 	nmatch = 0;
+	if (launchsession == L_CLIP) {
+		for (i = 0; i < nclips && nmatch < CLIPROWS; i++)
+			if (strcasestr(clips[i], query))
+				match[nmatch++] = i;
+		launchsel = 0;
+		return;
+	}
 	for (pass = 0; pass < 2; pass++)
 		for (i = 0; i < napps && nmatch < LAUNCHROWS; i++) {
 			if (apps[i].hidden || apps[i].nodisplay ||
@@ -2774,6 +2908,58 @@ static void filter(void)
 	launchsel = 0;
 }
 
+/* One row per copied text, and not half a character at the cut. */
+static void clipline(char *line, size_t size, const char *s)
+{
+	char *p;
+	size_t n;
+
+	snprintf(line, size, "%s", s + strspn(s, " \t\r\n"));
+	n = strlen(line);
+	if (n == size - 1) {
+		while (n && (line[n - 1] & 0xc0) == 0x80)
+			n--;
+		line[n ? n - 1 : 0] = '\0';
+	}
+	for (p = line; *p; p++)
+		if ((unsigned char)*p < ' ')
+			*p = ' ';
+}
+
+/* Small, at the pointer, and only as tall as its rows; the filter when used. */
+static void drawclips(void)
+{
+	struct rect r = mons[pointermon()];
+	int pad = 4, lh = font->ascent + font->descent + 8, w = min(CLIPW, r.w);
+	int h = (max(nmatch, 1) + !!qlen) * lh + 2 * pad, y = pad, i;
+	int base = (lh + font->ascent - font->descent) / 2;
+	char line[sizeof(query) + 16];
+
+	cliprect = (struct rect){ max(min(clipx, r.x + r.w - w), r.x),
+				  max(min(clipy, r.y + r.h - h), r.y), w, h };
+	XMoveResizeWindow(dpy, tabwin, cliprect.x, cliprect.y, w, h);
+	XMapRaised(dpy, tabwin);
+	XftDrawRect(tabdraw, &xc_bg, 0, 0, w, h);
+	if (qlen) {
+		snprintf(line, sizeof(line), "> %s_", query);
+		fittext(line, w - 4 * pad);
+		drawtext(tabdraw, &xc_fg, 2 * pad, y + base, line);
+		y += lh;
+	}
+	cliprowy = y;
+	clipliney = lh;
+	if (!nmatch)
+		drawtext(tabdraw, &xc_dim, 2 * pad, y + base,
+			 qlen ? "no match" : "nothing copied");
+	for (i = 0; i < nmatch; i++, y += lh) {
+		if (i == launchsel)
+			XftDrawRect(tabdraw, &xc_sel, pad / 2, y, w - pad, lh);
+		clipline(line, sizeof(line), clips[match[i]]);
+		fittext(line, w - 4 * pad);
+		drawtext(tabdraw, &xc_fg, 2 * pad, y + base, line);
+	}
+}
+
 static void drawlaunch(void)
 {
 	struct rect r = mons[pointermon()];
@@ -2782,6 +2968,10 @@ static void drawlaunch(void)
 	int i, y, base = (lh + font->ascent - font->descent) / 2;
 	char line[sizeof(query) + 16];
 
+	if (launchsession == L_CLIP) {
+		drawclips();
+		return;
+	}
 	XMoveResizeWindow(dpy, tabwin, r.x + (r.w - w) / 2, r.y + r.h / 5, w, h);
 	XMapRaised(dpy, tabwin);
 	XftDrawRect(tabdraw, &xc_bg, 0, 0, w, h);
@@ -2805,9 +2995,13 @@ static void drawlaunch(void)
 	}
 }
 
-/* The launcher, or with session set just lock, log out and the rest. */
+/* The launcher, just lock, log out and the rest, or what was copied. */
 static void launchstart(int session)
 {
+	Window dw;
+	int di;
+	unsigned int du;
+
 	if (tabbing || launching)
 		return;
 	if (XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync,
@@ -2815,6 +3009,11 @@ static void launchstart(int session)
 		return;
 	launching = 1;
 	launchsession = session;
+	XQueryPointer(dpy, root, &dw, &dw, &clipx, &clipy, &di, &di, &du);
+	/* hover and click on the list; a click anywhere else puts it away */
+	if (session == L_CLIP)
+		XGrabPointer(dpy, root, False, MOUSEMASK, GrabModeAsync,
+			     GrabModeAsync, None, cur_normal, CurrentTime);
 	loadapps();
 	query[0] = '\0';
 	qlen = 0;
@@ -2824,6 +3023,8 @@ static void launchstart(int session)
 
 static void endlaunch(void)
 {
+	if (launchsession == L_CLIP)
+		XUngrabPointer(dpy, CurrentTime);
 	launching = 0;
 	XUngrabKeyboard(dpy, CurrentTime);
 	XUnmapWindow(dpy, tabwin);
@@ -2843,6 +3044,14 @@ static void launchkey(XKeyEvent *ev)
 		return;
 	case XK_Return:
 	case XK_KP_Enter:
+		if (launchsession == L_CLIP) {
+			int pick = nmatch ? match[launchsel] : -1;
+
+			endlaunch();
+			if (pick >= 0)
+				clippaste(pick);
+			return;
+		}
 		if (nmatch)
 			spawn(apps[match[launchsel]].exec);
 		else if (qlen)
@@ -2875,6 +3084,43 @@ static void launchkey(XKeyEvent *ev)
 	drawlaunch();
 }
 
+/* The row of the clipboard list at a point on the screen, or -1. */
+static int cliprow(int x, int y)
+{
+	int i;
+
+	if (x < cliprect.x || x >= cliprect.x + cliprect.w ||
+	    y < cliprect.y + cliprowy)
+		return -1;
+	i = (y - cliprect.y - cliprowy) / clipliney;
+	return i < nmatch ? i : -1;
+}
+
+static void cliphover(int x, int y)
+{
+	int i = cliprow(x, y);
+
+	if (i >= 0 && i != launchsel) {
+		launchsel = i;
+		drawclips();
+	}
+}
+
+/*
+ * On the release, not the press: the paste then runs with no button down,
+ * which xdotool would otherwise lift and press again around its keys.
+ */
+static void clipclick(int x, int y)
+{
+	int i = cliprow(x, y), pick;
+
+	if (i < 0)
+		return;
+	pick = match[i];
+	endlaunch();
+	clippaste(pick);
+}
+
 /* Events */
 
 static void buttonpress(XEvent *e)
@@ -2888,6 +3134,13 @@ static void buttonpress(XEvent *e)
 	superalone = 0;
 	if (volpop) {
 		volpress(ev);
+		return;
+	}
+	if (launching && launchsession == L_CLIP) {
+		if (ev->x_root < cliprect.x || ev->y_root < cliprect.y ||
+		    ev->x_root >= cliprect.x + cliprect.w ||
+		    ev->y_root >= cliprect.y + cliprect.h)
+			endlaunch();
 		return;
 	}
 	if (tabbing && tabassist) {
@@ -3051,6 +3304,9 @@ static void keypress(XEvent *e)
 		case K_OSD:
 			osdrun(k->cmd, k->arg);
 			break;
+		case K_CLIP:
+			launchstart(L_CLIP);
+			break;
 		case K_QUIT:
 			running = 0;
 			break;
@@ -3067,7 +3323,7 @@ static void keyrelease(XEvent *e)
 		endtab(ntab ? tab[tabsel] : NULL);
 	} else if (superalone && (sym == XK_Super_L || sym == XK_Super_R)) {
 		superalone = 0;
-		launchstart(0);
+		launchstart(L_APPS);
 	} else if (assistpend && (sym == XK_Super_L || sym == XK_Super_R)) {
 		struct client *c = assistpend;
 
@@ -3176,6 +3432,10 @@ static void handle(XEvent *ev)
 	struct client *c;
 	int i;
 
+	if (xfbase >= 0 && ev->type == xfbase + XFixesSelectionNotify) {
+		clipchanged((XFixesSelectionNotifyEvent *)ev);
+		return;
+	}
 	if (rrbase >= 0 && ev->type == rrbase + RRNotify) {
 		if (((XRRNotifyEvent *)ev)->subtype == RRNotify_OutputChange)
 			outputchange((XRROutputChangeNotifyEvent *)ev);
@@ -3187,10 +3447,21 @@ static void handle(XEvent *ev)
 		break;
 	case ButtonRelease:
 		voldrag = 0;
+		if (launching && launchsession == L_CLIP &&
+		    ev->xbutton.button == Button1)
+			clipclick(ev->xbutton.x_root, ev->xbutton.y_root);
 		break;
 	case MotionNotify:
 		if (voldrag)
-			volmotion(ev->xmotion.x_root);
+			volmotion(ev->xmotion.y_root);
+		else if (launching && launchsession == L_CLIP)
+			cliphover(ev->xmotion.x_root, ev->xmotion.y_root);
+		break;
+	case SelectionNotify:
+		clipread(&ev->xselection);
+		break;
+	case SelectionRequest:
+		clipserve(&ev->xselectionrequest);
 		break;
 	case ClientMessage:
 		clientmessage(ev);
@@ -3434,6 +3705,7 @@ static void setup(void)
 	osddraw = XftDrawCreate(dpy, osdwin, DefaultVisual(dpy, scr),
 				DefaultColormap(dpy, scr));
 	initcomposite();
+	clipstart();
 	placebars();
 	if (nbars)
 		traystart();
@@ -3554,33 +3826,53 @@ static void osdrun(const char *cmd, int what)
 static void drawosd(int level, int muted)
 {
 	struct rect r = mons[sel ? clientmon(sel) : pointermon()];
-	int base = (OSDH + font->ascent - font->descent) / 2, bh = 6;
-	int fill = OSDBW * min(max(level, 0), 100) / 100;
+	int pad = 16, base = (OSDH + font->ascent - font->descent) / 2;
+	int bx = pad + 40, bw = OSDW - bx - pad - 56, bh = 6;
 	char num[16];
 
-	if (volpop) {
-		r = mons[0];
-		volx = r.x + (bars[0].soundx + bars[0].soundend - OSDW) / 2;
-		volx = max(min(volx, r.x + r.w - OSDW - 8), r.x + 8);
-		XMoveResizeWindow(dpy, osdwin, volx,
-				  r.y + r.h - BARH - OSDH - 8, OSDW, OSDH);
-	} else {
-		XMoveResizeWindow(dpy, osdwin, r.x + (r.w - OSDW) / 2,
-				  r.y + r.h - OSDH - 4 * BARH, OSDW, OSDH);
-	}
+	XMoveResizeWindow(dpy, osdwin, r.x + (r.w - OSDW) / 2,
+			  r.y + r.h - OSDH - 4 * BARH, OSDW, OSDH);
 	XMapRaised(dpy, osdwin);
 	XftDrawRect(osddraw, &xc_bg, 0, 0, OSDW, OSDH);
-	drawtext(osddraw, &xc_fg, OSDPAD, base, osdwhat == O_LIGHT ? LIGHTICON :
+	drawtext(osddraw, &xc_fg, pad, base, osdwhat == O_LIGHT ? LIGHTICON :
 		 muted ? MUTEDICON : SOUND);
-	XftDrawRect(osddraw, &xc_box, OSDBX, (OSDH - bh) / 2, OSDBW, bh);
-	XftDrawRect(osddraw, muted ? &xc_dim : &xc_sel, OSDBX, (OSDH - bh) / 2,
-		    fill, bh);
-	if (volpop)
-		XftDrawRect(osddraw, &xc_fg, OSDBX + fill - 3,
-			    (OSDH - 3 * bh) / 2, 6, 3 * bh);
+	XftDrawRect(osddraw, &xc_box, bx, (OSDH - bh) / 2, bw, bh);
+	XftDrawRect(osddraw, muted ? &xc_dim : &xc_sel, bx, (OSDH - bh) / 2,
+		    bw * min(max(level, 0), 100) / 100, bh);
 	snprintf(num, sizeof(num), "%d%%", level);
-	drawright(osddraw, OSDW - OSDPAD, base, num);
-	osdhideat = nowms() + (volpop ? VOLTIME : OSDTIME);
+	drawright(osddraw, OSDW - pad, base, num);
+	osdhideat = nowms() + OSDTIME;
+}
+
+static void drawcentered(int y, const char *s)
+{
+	int l, r;
+
+	inkrun(NULL, NULL, 0, 0, s, strlen(s), &l, &r);
+	inkrun(osddraw, &xc_fg, (VOLW - l - r) / 2, y, s, strlen(s), NULL, NULL);
+}
+
+/* The number and a track from 100 down to 0, over the button */
+static void drawvol(int level, int muted)
+{
+	struct rect r = mons[0];
+	int track = VOLBOT - VOLTOP, tw = 4;
+	int fill = track * min(max(level, 0), 100) / 100;
+	char num[16];
+
+	volx = r.x + (bars[0].soundx + bars[0].soundend - VOLW) / 2;
+	volx = max(min(volx, r.x + r.w - VOLW - 8), r.x + 8);
+	voly = r.y + r.h - BARH - VOLH - 8;
+	XMoveResizeWindow(dpy, osdwin, volx, voly, VOLW, VOLH);
+	XMapRaised(dpy, osdwin);
+	XftDrawRect(osddraw, &xc_bg, 0, 0, VOLW, VOLH);
+	snprintf(num, sizeof(num), "%d", level);
+	drawcentered(8 + font->ascent, num);
+	XftDrawRect(osddraw, &xc_box, (VOLW - tw) / 2, VOLTOP, tw, track);
+	XftDrawRect(osddraw, muted ? &xc_dim : &xc_sel, (VOLW - tw) / 2,
+		    VOLBOT - fill, tw, fill);
+	XftDrawRect(osddraw, &xc_fg, (VOLW - 16) / 2, VOLBOT - fill - 2, 16, 4);
+	osdhideat = nowms() + VOLTIME;
 }
 
 /* Unmuting too: dragging a muted slider should be heard. */
@@ -3593,10 +3885,11 @@ static void volsend(void)
 }
 
 /* One command at a time, or they could land out of order; the last one wins. */
-static void volmotion(int x)
+static void volmotion(int y)
 {
-	vollevel = min(max((x - volx - OSDBX) * 100 / OSDBW, 0), 100);
-	drawosd(vollevel, 0);
+	vollevel = (VOLBOT - (y - voly)) * 100 / (VOLBOT - VOLTOP);
+	vollevel = min(max(vollevel, 0), 100);
+	drawvol(vollevel, 0);
 	if (osdfd >= 0)
 		volpending = 1;
 	else
@@ -3629,16 +3922,13 @@ static void volclose(void)
 
 static void volpress(XButtonEvent *ev)
 {
-	struct rect r = mons[0];
-	int x = ev->x_root - volx, y = ev->y_root - (r.y + r.h - BARH - OSDH - 8);
+	int x = ev->x_root - volx, y = ev->y_root - voly;
 
-	if (x < 0 || x >= OSDW || y < 0 || y >= OSDH) {
+	if (x < 0 || x >= VOLW || y < 0 || y >= VOLH) {
 		volclose();
-	} else if (ev->button == Button1 && x < OSDBX - OSDPAD / 2) {
-		osdrun(MUTE GETVOL, O_SLIDER);
 	} else if (ev->button == Button1) {
 		voldrag = 1;
-		volmotion(ev->x_root);
+		volmotion(ev->y_root);
 	}
 }
 
@@ -3662,7 +3952,8 @@ static void osdread(void)
 	if (osdwhat == O_SLIDER && (!volpop || voldrag))
 		return;
 	if (osdlen && osdbuf[0] >= '0' && osdbuf[0] <= '9')
-		drawosd(atoi(osdbuf), strstr(osdbuf, " m") != NULL);
+		(volpop ? drawvol : drawosd)(atoi(osdbuf),
+					     strstr(osdbuf, " m") != NULL);
 }
 
 /*

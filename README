@@ -23,6 +23,9 @@ Keys
 	Super+E			nemo
 	Super+Shift+T/A/V/S	ocrclip, askclaude, voicetoggle, screenshot
 	Super+L, Ctrl+Alt+L	lock (cinnamon-screensaver)
+	Super+V			clipboard history at the pointer: click or Enter pastes,
+				type to filter
+				(text only, kept in memory; pastes with xdotool)
 	Fn keys			volume, mute, mic mute, brightness; a box shows the level
 	Ctrl+Alt+Delete		quit
 
@@ -35,8 +38,8 @@ Bar
 	clock and a power button
 	(lock, log out, suspend, restart, shut down). The first one
 	also has status text, tray icons and a sound button (click for a
-	volume slider, click its speaker to mute, right click for Cinnamon's
-	sound settings). The status text is the root
+	volume slider, right click for Cinnamon's sound settings). The status
+	text is the root
 	window name, set with xsetroot -name.
 
 No title bars; apps with their own (Chrome, GTK) drag as usual.
